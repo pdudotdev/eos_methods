@@ -1,0 +1,68 @@
+! ============================================================
+! Arista EOS — Enable All 5 Management Interfaces
+! Apply this config to your switch before running the benchmark
+! ============================================================
+
+! 1. SSH — enabled by default, set idle timeout
+management ssh
+   idle-timeout 15
+   no shutdown
+!
+
+! 2. eAPI — JSON-RPC over HTTPS
+management api http-commands
+   protocol https
+   no shutdown
+   vrf default
+!
+
+! 3. RESTCONF — OpenConfig REST interface
+!
+! Step A: Generate a self-signed certificate (run from privileged exec)
+!   security pki certificate generate self-signed restconf.crt key restconf.key generate rsa 2048 parameters common-name restconf
+!
+! Step B: Create the SSL profile and bind the cert/key
+management security
+   ssl profile restconf
+      certificate restconf.crt key restconf.key
+   ssl profile gnmi
+      certificate restconf.crt key restconf.key
+!
+! Step C: Enable RESTCONF with the SSL profile
+management api restconf
+   transport https test
+      ssl profile restconf
+      vrf default
+!
+
+! Step D: If RESTCONF connections are refused (port 6020) — LAB ONLY!
+ip access-list OPEN                                                                                                                                                                                                            
+  10 permit ip any any                                                                                                                                                                                                         
+  exit                                                                                                                                                                                                                           
+  system control-plane                                                                                                                                                                                                           
+  ip access-group OPEN in
+!
+
+! 4. NETCONF — OpenConfig XML interface over SSH
+management api netconf
+   transport ssh default
+      no shutdown
+!
+
+! 5. gNMI — gRPC Network Management Interface
+management api gnmi
+   transport grpc default
+   ssl profile gnmi
+!
+
+! 6. Telnet — for the good ol' days :)
+management telnet
+   no shutdown
+!
+
+! Verify all APIs are running:
+!   show management api http-commands
+!   show management api restconf
+!   show management api netconf
+!   show management api gnmi
+!   show management ssh
