@@ -20,7 +20,7 @@ pip install -r requirements.txt
 
 Usage
 -----
-  python arista_multi_connect.py
+  python arista.py
 
 Edit the SWITCH_PARAMS dict below with your device details.
 """
@@ -57,7 +57,7 @@ SWITCH_PARAMS = {
     "verify_ssl": False,
 }
 
-OUTPUT_FILE = "arista_benchmark_results.txt"
+OUTPUT_FILE = "findings/arista_benchmark_results.txt"
 
 
 @dataclass
@@ -368,6 +368,7 @@ def main():
         print(f"  {i:<6} {r.method:<30} {r.elapsed_seconds:<12.4f} {status}")
 
     report = generate_report(results, SWITCH_PARAMS)
+    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
     with open(OUTPUT_FILE, "w") as f:
         f.write(report)
 

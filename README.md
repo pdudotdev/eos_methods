@@ -3,24 +3,27 @@
 ## Summary
 Testing CLI/SSH, NETCONF, RESTCONF, gNMI, eAPI (and Telnet 😝) on Arista EOS.
 
-Luckily, Arista provides us with the chance to download and test is OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods necessary for network automation purposes:
+Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods necessary for network automation purposes:
 - CLI/SSH
 - RESTCONF
 - NETCONF
 - gNMI
 - eAPI
-- Telnet (just for fun)
+- *+ Telnet (just for fun)*
 
 ## Steps
 - Have an Arista EOS device up and reachable
-- See all the necessary configuration [**here](eos_setup/eos_setup.txt)
-- Create venv: `python3 -m venv arista && source arista\bin\activate`
-- Install requirements: `pip install -r requirements.txt`
-- Set your device's **mgmt IP and credentials** in the code
-- Run the test once: `python arista_multi_connect.py`
+- See all the necessary configuration [**here**](eos_setup/eos_setup.txt)
+- Create a venv: 
 ```
-(arista) mcp@mcp:~/arista$ python arista.py 
-
+python3 -m venv arista
+source arista/bin/activate
+```
+- Install requirements: 
+`pip install -r requirements.txt`
+- Set your device's **mgmt IP and credentials** in the code
+- Run the test once: `python arista.py`
+```
 ============================================================
   Arista Switch -- 5-Method Concurrent Benchmark
   Target: 172.20.20.208
@@ -28,7 +31,7 @@ Luckily, Arista provides us with the chance to download and test is OS [**for fr
 ============================================================
 
   Starting all 5 connections simultaneously...
-  Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI
+  Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI | Telnet
 
 
   All connections completed in 6.7608s (wall clock)
@@ -42,7 +45,7 @@ Luckily, Arista provides us with the chance to download and test is OS [**for fr
   5      NETCONF (ncclient)             2.3284       OK
   6      Telnet/CLI (Netmiko)           6.3079       OK
 
-  Full report written to: arista_benchmark_results.txt
+  Full report written to: findings/arista_benchmark_results.txt
 ```
 - Run 100 tests, get the average: `python benchmark_runner.py`
 ```
