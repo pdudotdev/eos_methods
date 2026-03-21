@@ -19,9 +19,11 @@ Luckily, Arista provides us with the chance to download and test its OS [**for f
 python3 -m venv arista
 source arista/bin/activate
 ```
-- Install requirements: 
-`pip install -r requirements.txt`
-- Set your device's **mgmt IP and credentials** in the code
+- Install requirements:
+```
+pip install -r requirements.txt
+```
+- Set your device's **mgmt IP and credentials** in `arista.py`
 - Run the test once: `python arista.py`
 ```
 ============================================================
@@ -61,7 +63,7 @@ source arista/bin/activate
   6      Telnet/CLI (Netmiko)           6.4224         100/100
 
 ```
-- Output of each query is saved to `arista_benchmark_results.txt`
+- Query outputs are saved to `arista_benchmark_results.txt`
 - Findings and lessons learned, saved to `findings/findings.md`
 - You can also run **Wireshark** to see more details (GEEK!)
 
