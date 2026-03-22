@@ -1,9 +1,10 @@
 # Arista EOS Management Tests
 
-**Device:** Arista EOS · 172.20.20.208<br/>
-**Query:** `show interfaces status` / `openconfig-interfaces:interfaces`<br/>
-**Captured:** Wireshark with `SSLKEYLOGFILE` for TLS decryption · local subnet<br/>
-**Client libraries:** `requests` (eAPI, RESTCONF) · `pygnmi` (gNMI) · `netmiko` (SSH/CLI, Telnet) · `ncclient` (NETCONF)
+- **Device:** Arista EOS · 172.20.20.208<br/>
+- **Query:** 
+`show interfaces status` / `openconfig-interfaces:interfaces`<br/>
+- **Captured:** Wireshark with `SSLKEYLOGFILE` for TLS decryption · local subnet<br/>
+- **Client libraries:** `requests` (eAPI, RESTCONF) · `pygnmi` (gNMI) · `netmiko` (SSH/CLI, Telnet) · `ncclient` (NETCONF)
 
 ---
 
