@@ -14,7 +14,7 @@ This report presents a packet-level analysis of all six management interfaces av
 
 The goal is not to benchmark raw throughput. The goal is to understand *why* each method takes the time it does: which phases dominate, what the protocol overhead looks like on the wire, how server-side processing costs differ, and where each method's design trade-offs show up in packet timing.
 
-Every measurement reported here is derived directly from the packet captures — inter-packet gaps, segment sizes, and cumulative elapsed time from SYN to the final packet. No estimates. Where TLS encryption hides payload contents, only sizes and timing are reported; where traffic is in plaintext (SSH banners, Telnet, eAPI/RESTCONF with key log decryption), the exact content is shown.
+Every measurement reported here is derived directly from the packet captures — inter-packet gaps, segment sizes, and cumulative elapsed time from SYN to the final packet. No estimates. Where encryption hides payload contents, only sizes and timing are reported; where traffic is in plaintext or decryptable (Telnet, SSH banners and key exchange, eAPI/RESTCONF with the included TLS key log), the exact content is shown.
 
 ### Test Environment
 
@@ -29,7 +29,7 @@ The device under test ran Arista EOS with all six management interfaces enabled 
 | SSH/CLI   | 22    | `management ssh`                         |
 | Telnet    | 23    | `management telnet`                      |
 
-All six connections were initiated concurrently from a Python benchmark script on the same local subnet as the device. TLS key material for eAPI and RESTCONF was captured via `SSLKEYLOGFILE` and loaded into Wireshark for decryption. gNMI uses `grpcio`/BoringSSL, which does not write to `SSLKEYLOGFILE`, so gNMI payload content is not visible in the capture; SSH traffic is encrypted after the key exchange phase; Telnet is fully plaintext.
+All six connections were initiated concurrently from a Python benchmark script on the same local subnet as the device. TLS key material for eAPI and RESTCONF was captured via `SSLKEYLOGFILE`; the session keys for these two captures are included in this repository as `pcaps/tls_keys.log` and can be loaded into Wireshark to decrypt the HTTP content. gNMI uses `grpcio`/BoringSSL, which does not write to `SSLKEYLOGFILE`, so gNMI payload content is not visible in the capture; SSH traffic is encrypted after the key exchange phase; Telnet is fully plaintext.
 
 ### Benchmark Results Summary
 
@@ -46,11 +46,15 @@ Measured end-to-end time from TCP SYN to final packet (Python client on same LAN
 
 The spread between fastest and slowest is **6.35 seconds** — for retrieving identical data from the same device. The analysis that follows explains exactly where that time goes.
 
+> **Packet size methodology:** All byte values in packet diagrams correspond to Wireshark's **Length** column — the full Ethernet frame including all headers (14-byte Ethernet + 20-byte IP + 20-32-byte TCP + payload). Body text that refers to "response payload" or "content size" describes application-layer data only.
+
 ---
 
 ## 1. eAPI — HTTPS JSON-RPC
 
 **Port:** 443 | **Protocol:** HTTP/1.1 over TLS 1.3 | **Total packets:** 19 | **Measured time:** ~97ms
+
+> **Wireshark note:** To view the decrypted HTTP request and response content, load `pcaps/tls_keys.log` via **Edit → Preferences → Protocols → TLS → (Pre)-Master-Secret log filename**. The HTTP payload in phases 4 and 6 will then be visible.
 
 ### Phase 1 — TCP 3-Way Handshake (~0.05ms)
 
@@ -74,53 +78,50 @@ After the TCP ACK there is a **52.8ms pause** before the TLS ClientHello. No pac
 ### Phase 3 — TLS 1.3 Handshake (~4ms, packets 4–10)
 
 ```
-#4   Client  →  Server   [TLS ClientHello]          517 bytes
+#4   Client  →  Server   [TLS ClientHello]          583 bytes
 #5   Server  →  Client   [ACK]
-#6   Server  →  Client   [TLS ServerHello+...]       1308 bytes
+#6   Server  →  Client   [TLS ServerHello+...]       1374 bytes
 #7   Client  →  Server   [ACK]
-#8   Client  →  Server   [TLS Client Finished]       80 bytes
-#9   Server  →  Client   [TLS NewSessionTicket]      79 bytes
-#10  Server  →  Client   [TLS NewSessionTicket]      79 bytes
+#8   Client  →  Server   [TLS Client Finished]       146 bytes
+#9   Server  →  Client   [Application Data]          145 bytes  ← NewSessionTicket
+#10  Server  →  Client   [Application Data]          145 bytes  ← NewSessionTicket
 ```
 
-**ClientHello (517 bytes):** The client advertises supported cipher suites, TLS extensions, and critically a **key share** — its EC Diffie-Hellman public key. This enables TLS 1.3's 1-RTT handshake: the server can derive shared keys immediately without waiting for another round trip.
+**ClientHello (583 bytes):** The client advertises supported cipher suites, TLS extensions, and critically a **key share** — its EC Diffie-Hellman public key. This enables TLS 1.3's 1-RTT handshake: the server can derive shared keys immediately without waiting for another round trip.
 
-**ServerHello + EncryptedExtensions + Certificate + Finished (1308 bytes):** In TLS 1.3, the server compresses what was previously 4–5 separate messages into a single flight. It sends its own DH public key (completing the key agreement), its certificate (already encrypted — unlike TLS 1.2), and its Finished message. Both sides now have all the keys needed for application data.
+**ServerHello + EncryptedExtensions + Certificate + Finished (1374 bytes):** In TLS 1.3, the server compresses what was previously 4–5 separate messages into a single flight. It sends its own DH public key (completing the key agreement), its certificate (already encrypted — unlike TLS 1.2), and its Finished message. Both sides now have all the keys needed for application data.
 
-**Client Finished (80 bytes):** The client confirms the handshake is complete. Application data can now flow.
+**Client Finished (146 bytes):** The client confirms the handshake is complete. Application data can now flow.
 
-**Two NewSessionTicket messages (79 bytes each):** TLS 1.3 session tickets, sent after the handshake, allow session resumption in future connections (0-RTT), avoiding the full key exchange cost. Not used in this benchmark since each run creates a fresh connection.
+**Two NewSessionTicket messages (145 bytes each):** TLS 1.3 session tickets, sent after the handshake, allow session resumption in future connections (0-RTT), avoiding the full key exchange cost. Not used in this benchmark since each run creates a fresh connection.
 
 The entire TLS handshake takes **~4ms** — significantly faster than TLS 1.2, which required 2 round trips for key exchange alone.
 
 ### Phase 4 — HTTP POST Request (~0.3ms, packets 11–13)
 
 ```
-#11  Client  →  Server   [Application Data]  270 bytes
-#12  Client  →  Server   [Application Data]  165 bytes
+#11  Client  →  Server   [Application Data]  336 bytes
+#12  Client  →  Server   [Application Data]  231 bytes
 #13  Server  →  Client   [ACK]
 ```
 
-The eAPI request is sent as an **HTTP POST to a single fixed endpoint** (`/command-api`). The full request, split across two TCP segments:
+The eAPI request is sent as an **HTTP POST to a single fixed endpoint** (`/command-api`). The request is split at the natural headers/body boundary across two TCP segments — packet 11 carries the HTTP headers, packet 12 carries the JSON body:
 
-```json
+```
 POST /command-api HTTP/1.1
 Host: 172.20.20.208
+User-Agent: python-requests/2.32.5
+Accept-Encoding: gzip, deflate
+Accept: */*
+Connection: keep-alive
+Content-Length: 143
 Content-Type: application/json
+Authorization: Basic YWRtaW46YWRtaW4=
 
-{
-  "jsonrpc": "2.0",
-  "method": "runCmds",
-  "params": {
-    "version": 1,
-    "cmds": ["show interfaces status"],
-    "format": "json"
-  },
-  "id": "benchmark-eapi"
-}
+{"jsonrpc": "2.0", "method": "runCmds", "params": {"version": 1, "cmds": ["show interfaces status"], "format": "json"}, "id": "benchmark-eapi"}
 ```
 
-There is no URL hierarchy, no YANG path, no resource model — just a CLI command string wrapped in a JSON-RPC envelope. The server needs no model translation; it runs the command as-is.
+There is no URL hierarchy, no YANG path, no resource model — just a CLI command string wrapped in a JSON-RPC envelope. The server needs no model translation; it runs the command as-is. Authentication is HTTP Basic Auth (`Authorization: Basic YWRtaW46YWRtaW4=` = `admin:admin` in Base64), transmitted inside the TLS tunnel. The `Accept-Encoding: gzip` header tells the server to compress the response.
 
 ### Phase 5 — Server Processing (~32ms gap)
 
@@ -129,14 +130,14 @@ After the ACK on the request, the server goes silent for **31.96ms**. This is th
 ### Phase 6 — HTTP Response (~6.8ms, packets 14–16)
 
 ```
-#14  Server  →  Client   [Application Data]  895 bytes
-#15  Server  →  Client   [Application Data]  42 bytes   ← TLS close_notify
+#14  Server  →  Client   [Application Data]  961 bytes
+#15  Server  →  Client   [Application Data]  108 bytes  ← HTTP response tail
 #16  Client  →  Server   [ACK]
 ```
 
-**Total response payload: ~937 bytes.** This is a compact, flat JSON structure — Arista's native internal representation of interface state, directly serialised. No namespace annotations, no deeply nested YANG containers. Just the relevant fields.
+**Total HTTP response: 893 bytes** across two TLS records (487 bytes of headers + 402 bytes of chunked body). The body is gzip-compressed: 385 bytes of compressed data that decompresses to a **2,373-byte JSON** object — Arista's native flat representation of interface state, directly serialised with no namespace annotations or YANG container nesting.
 
-The 42-byte second packet is the TLS `close_notify` alert, signalling the server is done sending.
+The 108-byte second packet contains the second (10-byte) gzip chunk — the deflate end-of-block marker, CRC32, and ISIZE — plus the chunked transfer terminator (`\r\n0\r\n\r\n`). The server closes the connection without sending a TLS `close_notify` alert; it signals end-of-response via the chunked terminator and then closes with a TCP FIN. Decryption of both records is possible using `pcaps/tls_keys.log`.
 
 ### Phase 7 — TCP Teardown (~0.8ms, packets 17–19)
 
@@ -163,7 +164,7 @@ Clean 4-way FIN (compressed into 3 steps since the server piggybacks its FIN). C
 
 ### Why eAPI Is Fastest
 
-The **32ms server processing time** and **937-byte response** are the key metrics. eAPI avoids all model translation — no YANG schema traversal, no namespace mapping, no OpenConfig conversion. The EOS command processor returns its native data structure and serialises it directly to JSON. The wire payload is minimal, server work is minimal, and the HTTP/1.1 framing adds no overhead beyond what TLS already costs.
+The **32ms server processing time** and **compact response** are the key metrics. eAPI avoids all model translation — no YANG schema traversal, no namespace mapping, no OpenConfig conversion. The EOS command processor returns its native data structure, serialises it directly to JSON (2,373 bytes), and gzip-compresses it to 385 bytes on the wire. The wire payload is minimal, server work is minimal, and the HTTP/1.1 framing adds no overhead beyond what TLS already costs.
 
 The 52.8ms Python setup cost is a fixed overhead paid by all HTTPS-based methods equally and is not a property of eAPI itself.
 
@@ -173,7 +174,7 @@ The 52.8ms Python setup cost is a fixed overhead paid by all HTTPS-based methods
 
 **Port:** 6020 | **Protocol:** HTTP/1.1 over TLS 1.3 | **Total packets:** 25 | **Measured time:** ~110ms
 
-> **Wireshark note:** Wireshark misidentifies port 6020 as X11 (which uses the 6000–6063 range). To see decrypted HTTP traffic: right-click any packet → **Decode As → TLS**. With the key log file already loaded, the HTTP payload will become visible.
+> **Wireshark note:** Wireshark misidentifies port 6020 as X11 (which uses the 6000–6063 range). To see decrypted HTTP traffic: load `pcaps/tls_keys.log` (see eAPI note above), then right-click any packet → **Decode As → TLS**. The HTTP payload will then be visible.
 
 ### Phase 1 — TCP 3-Way Handshake (~0.04ms)
 
@@ -187,28 +188,28 @@ Identical mechanics to eAPI. Completes in under a millisecond on the local subne
 
 ### Phase 2 — Python/requests SSL Setup (~45ms gap)
 
-A **44.7ms pause** after the TCP ACK before the TLS ClientHello. Same cause as eAPI: Python's `requests` library initialising the SSL context and HTTP session. Slightly shorter than eAPI's 52.8ms gap because all five connections are launched concurrently — the SSL context may already be partially warm from the eAPI connection starting at the same time.
+A **44.7ms pause** after the TCP ACK before the TLS ClientHello. Same cause as eAPI: Python's `requests` library initialising the SSL context and HTTP session. Slightly shorter than eAPI's 52.8ms gap because all six connections are launched concurrently — the SSL context may already be partially warm from the eAPI connection starting at the same time.
 
 ### Phase 3 — TLS 1.3 Handshake (~5ms, packets 4–10)
 
 ```
-#4   Client  →  Server   [TLS ClientHello]     517 bytes
+#4   Client  →  Server   [TLS ClientHello]     583 bytes
 #5   Server  →  Client   [ACK]
-#6   Server  →  Client   [TLS ServerHello+...] 1428 bytes
+#6   Server  →  Client   [TLS ServerHello+...] 1494 bytes
 #7   Client  →  Server   [ACK]
-#8   Client  →  Server   [TLS Finished]        64 bytes
-#9   Client  →  Server   [HTTP GET request]    321 bytes  ← piggybacked immediately
+#8   Client  →  Server   [TLS Finished]        130 bytes
+#9   Client  →  Server   [HTTP GET request]    387 bytes
 #10  Server  →  Client   [ACK]
 ```
 
-The ServerHello is slightly larger than eAPI's (1428 vs 1308 bytes) because this connection uses the **`restconf` SSL profile** with its own self-signed certificate (`restconf.crt`). The certificate itself — embedded in the TLS ServerHello flight — carries the additional bytes.
+The ServerHello is slightly larger than eAPI's (1494 vs 1374 bytes) because this connection uses the **`restconf` SSL profile** with its own self-signed certificate (`restconf.crt`). The certificate itself — embedded in the TLS ServerHello flight — carries the additional bytes.
 
-One notable difference: after sending the TLS Finished, the client **immediately** sends the HTTP GET request in the next packet (321 bytes) without waiting. TLS 1.3 allows this — application data can be sent as soon as the client has finished its part of the handshake, before the server even acknowledges it. This reduces one round trip compared to TLS 1.2 behaviour.
+One notable difference: after sending the TLS Finished, the client **immediately** sends the HTTP GET request in the next packet (387 bytes) without waiting. TLS 1.3 allows this — application data can be sent as soon as the client has finished its part of the handshake, before the server even acknowledges it. This reduces one round trip compared to TLS 1.2 behaviour.
 
 ### Phase 4 — HTTP GET Request (~1ms)
 
 ```
-#9   Client  →  Server   [Application Data]  321 bytes
+#9   Client  →  Server   [Application Data]  387 bytes
 ```
 
 Unlike eAPI's POST to a single endpoint, RESTCONF uses a **GET to a YANG-defined URL**:
@@ -230,21 +231,21 @@ The ~24ms difference vs eAPI's server processing time is a direct measurement of
 ### Phase 6 — HTTP Response (~1ms, packets 11–22)
 
 ```
-#11  Server  →  Client   [Application Data]  1208 bytes
-#12  Server  →  Client   [Application Data]  2394 bytes
+#11  Server  →  Client   [Application Data]  1274 bytes
+#12  Server  →  Client   [Application Data]  2460 bytes
 #13  Client  →  Server   [ACK]
-#14  Server  →  Client   [Application Data]  560 bytes
-#15  Server  →  Client   [Application Data]  4766 bytes
+#14  Server  →  Client   [Application Data]  626 bytes
+#15  Server  →  Client   [Application Data]  4832 bytes
 #16  Client  →  Server   [ACK]
-#17  Server  →  Client   [Application Data]  5952 bytes
-#18  Server  →  Client   [Application Data]  7138 bytes
+#17  Server  →  Client   [Application Data]  6018 bytes
+#18  Server  →  Client   [Application Data]  7204 bytes
 #19  Client  →  Server   [ACK]
-#20  Server  →  Client   [Application Data]  1162 bytes
-#21  Server  →  Client   [Application Data]  29 bytes   ← TLS close_notify
+#20  Server  →  Client   [Application Data]  1228 bytes
+#21  Server  →  Client   [Application Data]  95 bytes   ← TLS close_notify
 #22  Client  →  Server   [ACK]
 ```
 
-**Total response payload: ~23,209 bytes** — approximately **25× larger** than eAPI's 937-byte response for the same interface data.
+**Total response payload: ~23,209 bytes** — approximately **~10× larger** than eAPI's 2,373-byte JSON for the same interface data.
 
 The size difference is structural. The YANG-mapped JSON is deeply nested with full namespace annotations, parent containers (`config`, `state`, `subinterfaces`), and Arista augment nodes for every field. Where eAPI returns `"linkStatus": "connected"`, RESTCONF returns the same information wrapped in multiple container levels with explicit YANG namespace attributes.
 
@@ -254,7 +255,7 @@ The response spans **8 TCP segments** (7 data + 1 TLS close_notify), ACK'd in gr
 
 ```
 #23  Client  →  Server   [FIN+ACK]
-#24  Server  →  Client   [Application Data]  24 bytes   ← TLS close_notify
+#24  Server  →  Client   [Application Data]  90 bytes   ← TLS close_notify
 #25  Client  →  Server   [RST]
 ```
 
@@ -278,7 +279,7 @@ The client sends FIN, the server responds with a TLS `close_notify` alert, and t
 Two compounding factors:
 
 1. **Server processing:** 56ms vs 32ms — the YANG model translation adds ~24ms of CPU work on the device for every request.
-2. **Response size:** 23KB vs 937 bytes — the YANG-compliant JSON is ~25× larger, requiring 8 TCP segments vs eAPI's 2.
+2. **Response size:** 23KB vs 2,373 bytes — the YANG-compliant JSON is ~10× larger, requiring 8 TCP segments vs eAPI's 2.
 
 The TLS handshake cost is essentially identical between the two methods. The difference is entirely in what the server has to do to produce the response and how much data it sends back.
 
@@ -302,15 +303,15 @@ This is **documented pygnmi behaviour**: when no local certificate file is provi
 #1   Client  →  Server   [SYN]
 #2   Server  →  Client   [SYN-ACK]
 #3   Client  →  Server   [ACK]
-#4   Client  →  Server   [TLS ClientHello]       517 bytes
+#4   Client  →  Server   [TLS ClientHello]       583 bytes
 #5   Server  →  Client   [ACK]
-#6   Server  →  Client   [TLS ServerHello+...]   1413 bytes  ← certificate is here
+#6   Server  →  Client   [TLS ServerHello+...]   1479 bytes  ← certificate is here
 #7   Client  →  Server   [ACK]
-#8   Client  →  Server   [TLS Finished]           64 bytes
+#8   Client  →  Server   [TLS Finished]           130 bytes
 #9   Client  →  Server   [RST]                               ← certificate extracted, done
 ```
 
-pygnmi needs the server's certificate to configure `grpc.ssl_channel_credentials()` before creating the gRPC channel. Since the certificate arrives inside the TLS ServerHello flight (packet #6, 1413 bytes), pygnmi only needs to complete enough of the handshake to receive it. Once the client sends its TLS Finished (packet #8) and the handshake is complete, the certificate has been extracted — the connection is immediately reset (packet #9) because its purpose is fulfilled.
+pygnmi needs the server's certificate to configure `grpc.ssl_channel_credentials()` before creating the gRPC channel. Since the certificate arrives inside the TLS ServerHello flight (packet #6, 1479 bytes), pygnmi only needs to complete enough of the handshake to receive it. Once the client sends its TLS Finished (packet #8) and the handshake is complete, the certificate has been extracted — the connection is immediately reset (packet #9) because its purpose is fulfilled.
 
 The RST is not an error. It is a deliberate close once certificate extraction is complete. This first connection costs approximately **15ms** of overhead before the real gRPC session starts.
 
@@ -329,32 +330,32 @@ After the RST there is a ~21ms gap while pygnmi builds the gRPC channel credenti
 #### TLS 1.3 Handshake (~23ms, packets 13–20)
 
 ```
-#13  Client  →  Server   [TLS ClientHello]       517 bytes   +5.2ms
+#13  Client  →  Server   [TLS ClientHello]       583 bytes   +5.2ms
 #14  Server  →  Client   [ACK]
-#15  Server  →  Client   [TLS ServerHello+...]   1455 bytes  +15ms
+#15  Server  →  Client   [TLS ServerHello+...]   1521 bytes  +15ms
 #16  Client  →  Server   [ACK]
-#17  Client  →  Server   [TLS Finished]           64 bytes
-#18  Client  →  Server   [HTTP/2 preface]         104 bytes  ← piggybacked immediately
+#17  Client  →  Server   [TLS Finished]           130 bytes
+#18  Client  →  Server   [HTTP/2 preface]         170 bytes
 #19  Server  →  Client   [ACK]
-#20  Server  →  Client   [TLS NewSessionTicket]   43 bytes
+#20  Server  →  Client   [TLS NewSessionTicket]   109 bytes
 ```
 
-The ServerHello is larger here (1455 vs 1413 bytes) because the gRPC TLS negotiation path under BoringSSL uses slightly different cipher and extension sets compared to the Python SSL socket used in connection 1.
+The ServerHello is larger here (1521 vs 1479 bytes) because the gRPC TLS negotiation path under BoringSSL uses slightly different cipher and extension sets compared to the Python SSL socket used in connection 1.
 
-After sending its TLS Finished (packet #17), the client **immediately piggybacks the HTTP/2 connection preface** (packet #18, 104 bytes) without waiting for the server to respond — TLS 1.3 allows this since both sides already hold the session keys. The server sends a NewSessionTicket (packet #20, 43 bytes) for potential future session resumption.
+After sending its TLS Finished (packet #17), the client **immediately piggybacks the HTTP/2 connection preface** (packet #18, 170 bytes) without waiting for the server to respond — TLS 1.3 allows this since both sides already hold the session keys. The server sends a NewSessionTicket (packet #20, 109 bytes) for potential future session resumption.
 
 #### HTTP/2 + gRPC Setup (~5ms, packets 21–25)
 
 This is the layer that fundamentally separates gNMI from eAPI and RESTCONF. HTTP/2 requires a full connection negotiation before any gNMI data can be requested:
 
 ```
-#21  Client  →  Server   31 bytes   HTTP/2 SETTINGS ACK
-#22  Server  →  Client   31 bytes   HTTP/2 SETTINGS ACK
-#23  Client  →  Server   308 bytes  HTTP/2 HEADERS + DATA
+#21  Client  →  Server   97 bytes   HTTP/2 SETTINGS ACK
+#22  Server  →  Client   97 bytes   HTTP/2 SETTINGS ACK
+#23  Client  →  Server   374 bytes  HTTP/2 HEADERS + DATA
                                     └─ HEADERS: gRPC method, path (/gnmi.gNMI/Get)
                                     └─ DATA: protobuf-encoded gNMI GetRequest for /interfaces
-#24  Server  →  Client   52 bytes   HTTP/2 SETTINGS + response HEADERS (status 200)
-#25  Client  →  Server   39 bytes   HTTP/2 WINDOW_UPDATE (flow control)
+#24  Server  →  Client   118 bytes  HTTP/2 SETTINGS + response HEADERS (status 200)
+#25  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE (flow control)
 ```
 
 The **HTTP/2 SETTINGS exchange** (packets #18–#22) is mandatory — both endpoints negotiate stream parameters (max concurrent streams, flow control window size, max frame size, header compression table) before any RPC proceeds. This requires one full round trip that HTTP/1.1 methods (eAPI, RESTCONF) simply don't pay.
@@ -377,20 +378,20 @@ Two ACK-only packets, each preceded by a ~41ms gap. The device is translating EO
 
 ```
 ── Burst 1 (~17KB, ~2ms) ──
-#27  Server  →  Client   4766 bytes
-#29  Server  →  Client   5952 bytes
-#30  Server  →  Client   6735 bytes
+#27  Server  →  Client   4832 bytes
+#29  Server  →  Client   6018 bytes
+#30  Server  →  Client   6801 bytes
 #28/#31  Client  →  Server   [ACK + WINDOW_UPDATE]
-#32  Client  →  Server   39 bytes   HTTP/2 WINDOW_UPDATE
-#34  Server  →  Client   39 bytes   HTTP/2 DATA (continued)
-#35  Client  →  Server   150 bytes  HTTP/2 WINDOW_UPDATE / PING
-#36  Server  →  Client   52 bytes
-#37  Client  →  Server   39 bytes   HTTP/2 WINDOW_UPDATE
+#32  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE
+#34  Server  →  Client   105 bytes  HTTP/2 DATA (continued)
+#35  Client  →  Server   216 bytes  HTTP/2 WINDOW_UPDATE / PING
+#36  Server  →  Client   118 bytes
+#37  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE
      ← #38: server ACK only — 41ms processing gap (second half encoding) →
 ── Burst 2 (~24KB, ~0.1ms) ──
-#39  Server  →  Client   10696 bytes
-#40  Server  →  Client   11882 bytes
-#41  Server  →  Client   1378 bytes
+#39  Server  →  Client   10762 bytes
+#40  Server  →  Client   11948 bytes
+#41  Server  →  Client   1444 bytes
 #42/#43  Client  →  Server   [ACK]   ← TCP delayed ACK timer (~41ms)
 ```
 
@@ -401,12 +402,12 @@ The size is explained by the encoding: `encoding="json"` in the script causes th
 #### Connection Teardown (packets 44–50)
 
 ```
-#44  Client  →  Server   39 bytes   HTTP/2 GOAWAY frame
+#44  Client  →  Server   105 bytes  HTTP/2 GOAWAY frame
 #45  Server  →  Client   [ACK]
-#46  Server  →  Client   39 bytes   HTTP/2 GOAWAY response
+#46  Server  →  Client   105 bytes  HTTP/2 GOAWAY response
 #47  Client  →  Server   [ACK]
 #48  Client  →  Server   [FIN+ACK]
-#49  Server  →  Client   24 bytes   TLS close_notify
+#49  Server  →  Client   90 bytes   TLS close_notify
 #50  Client  →  Server   [RST]
 ```
 
@@ -447,6 +448,8 @@ In production with a locally-pinned certificate (eliminating connection 1), prot
 
 **Port:** 22 | **Protocol:** SSHv2 (paramiko) | **Total packets:** 80 | **Measured time:** ~1,967ms
 
+> **Wireshark note:** SSH session keys are derived in-memory during the key exchange and are never exported — there is no `SSLKEYLOGFILE` equivalent for SSH. All traffic after the NEWKEYS message (packet #12) is permanently opaque in the capture. Only sizes and timing are available for the encrypted phases.
+
 ### Phase 1 — TCP 3-Way Handshake (~0.05ms, packets 1–3)
 
 ```
@@ -460,9 +463,9 @@ Standard TCP handshake. Completes in ~0.05ms on the local subnet. Unlike TLS-bas
 ### Phase 2 — SSH Version Banner Exchange (~27ms, packets 4–7)
 
 ```
-#4   Client  →  Server   24 bytes   "SSH-2.0-paramiko_4.0.0\r\n"
+#4   Client  →  Server   90 bytes   "SSH-2.0-paramiko_4.0.0\r\n"
 #5   Server  →  Client   [ACK]
-#6   Server  →  Client   21 bytes   "SSH-2.0-OpenSSH_9.9\r\n"
+#6   Server  →  Client   87 bytes   "SSH-2.0-OpenSSH_9.9\r\n"
 #7   Client  →  Server   [ACK]
 ```
 
@@ -473,41 +476,41 @@ The ~27ms gap between packets 4 and 6 is the server preparing its key exchange d
 ### Phase 3 — SSH Key Exchange (~47ms, packets 8–13)
 
 ```
-#8   Client  →  Server   1256 bytes   SSH2_MSG_KEXINIT (algorithm lists)
-#9   Server  →  Client   736 bytes    SSH2_MSG_KEXINIT (algorithm lists)
-#10  Client  →  Server   48 bytes     SSH2_MSG_KEX_ECDH_INIT (client public key)
-#11  Server  →  Client   512 bytes    SSH2_MSG_KEX_ECDH_REPLY (server public key + host key + signature)
-#12  Client  →  Server   16 bytes     SSH2_MSG_NEWKEYS
+#8   Client  →  Server   1322 bytes   SSH2_MSG_KEXINIT (algorithm lists)
+#9   Server  →  Client   802 bytes    SSH2_MSG_KEXINIT (algorithm lists)
+#10  Client  →  Server   114 bytes    SSH2_MSG_KEX_ECDH_INIT (client public key)
+#11  Server  →  Client   578 bytes    SSH2_MSG_KEX_ECDH_REPLY (server public key + host key + signature)
+#12  Client  →  Server   82 bytes     SSH2_MSG_NEWKEYS
 #13  Server  →  Client   [ACK]        — 41ms gap, then encryption begins
 ```
 
-**KEXINIT (packets 8–9, 1256 + 736 bytes):** Both sides send their full list of supported algorithms — key exchange methods, host key types, ciphers, MACs, and compression. The negotiation result (the intersection of both lists) determines what crypto is used for the session. These packets are still in plaintext and are readable in Wireshark.
+**KEXINIT (packets 8–9, 1322 + 802 bytes):** Both sides send their full list of supported algorithms — key exchange methods, host key types, ciphers, MACs, and compression. The negotiation result (the intersection of both lists) determines what crypto is used for the session. These packets are still in plaintext and are readable in Wireshark.
 
-**ECDH exchange (packets 10–11):** The client sends its ephemeral Elliptic Curve Diffie-Hellman public key (48 bytes). The server responds with its own ECDH public key, its host key (used to authenticate the server's identity), and a signature proving it holds the private key (512 bytes total). Both sides can now independently derive the same shared secret — this is the key agreement.
+**ECDH exchange (packets 10–11):** The client sends its ephemeral Elliptic Curve Diffie-Hellman public key (114 bytes). The server responds with its own ECDH public key, its host key (used to authenticate the server's identity), and a signature proving it holds the private key (578 bytes total). Both sides can now independently derive the same shared secret — this is the key agreement.
 
-**NEWKEYS (packet 12, 16 bytes):** The smallest but most important message — signals that both sides are switching to the negotiated encryption. Every packet after this is encrypted with the derived keys. This is the equivalent of TLS's Change Cipher Spec.
+**NEWKEYS (packet 12, 82 bytes):** The smallest but most important message — signals that both sides are switching to the negotiated encryption. Every packet after this is encrypted with the derived keys. This is the equivalent of TLS's Change Cipher Spec.
 
 The 41ms ACK-only gap at packet 13 is the server processing the key exchange and computing the session keys before the encrypted phase begins.
 
 ### Phase 4 — Encrypted Authentication (~1,540ms, packets 14–25)
 
 ```
-#14  Client  →  Server   64 bytes    SSH_MSG_SERVICE_REQUEST (encrypted)
+#14  Client  →  Server   130 bytes   SSH_MSG_SERVICE_REQUEST (encrypted)
 #15  Server  →  Client   [ACK]
-#16  Server  →  Client   64 bytes    SSH_MSG_SERVICE_ACCEPT (encrypted)
-#17  Client  →  Server   96 bytes    SSH_MSG_USERAUTH_REQUEST - username (encrypted)
-#18  Server  →  Client   80 bytes    SSH_MSG_USERAUTH_FAILURE or methods (encrypted)
-#19  Client  →  Server   64 bytes    (encrypted)
-#20  Server  →  Client   64 bytes    (encrypted)
-#21  Client  →  Server   112 bytes   SSH_MSG_USERAUTH_REQUEST - password (encrypted)
-#22  Server  →  Client   80 bytes    (encrypted)
-#23  Client  →  Server   64 bytes    (encrypted)
+#16  Server  →  Client   130 bytes   SSH_MSG_SERVICE_ACCEPT (encrypted)
+#17  Client  →  Server   162 bytes   SSH_MSG_USERAUTH_REQUEST - username (encrypted)
+#18  Server  →  Client   146 bytes   SSH_MSG_USERAUTH_FAILURE or methods (encrypted)
+#19  Client  →  Server   130 bytes   (encrypted)
+#20  Server  →  Client   130 bytes   (encrypted)
+#21  Client  →  Server   178 bytes   SSH_MSG_USERAUTH_REQUEST - password (encrypted)
+#22  Server  →  Client   146 bytes   (encrypted)
+#23  Client  →  Server   130 bytes   (encrypted)
 #24  Server  →  Client   [ACK]       — 42ms gap
      ← 1.476s gap — server authenticating password →
-#25  Server  →  Client   64 bytes    SSH_MSG_USERAUTH_SUCCESS (encrypted)
+#25  Server  →  Client   130 bytes   SSH_MSG_USERAUTH_SUCCESS (encrypted)
 ```
 
-All packets in this phase are fully encrypted — only sizes and timing are visible in the capture. The notable pattern is that all SSH encrypted packets appear as multiples of **64 bytes** regardless of actual payload size. This is SSH's mandatory packet padding: all encrypted SSH packets must be padded to a multiple of the cipher's block size (16 bytes for AES), and the minimum size is 16 bytes — Netmiko/paramiko adds extra padding to fixed 64-byte blocks.
+All packets in this phase are fully encrypted — only sizes and timing are visible in the capture. The notable pattern is that all SSH encrypted packets appear at frame lengths of 130, 146, 162, or 178 bytes. The SSH payload portion (frame length minus 66 bytes of Ethernet + IP + TCP headers) is always a multiple of **64 bytes**. This is SSH's mandatory packet padding: all encrypted SSH packets must be padded to a multiple of the cipher's block size (16 bytes for AES), and the minimum size is 16 bytes — Netmiko/paramiko adds extra padding to fixed 64-byte SSH payload blocks.
 
 The **1.476s gap** between packets 24 and 25 is the single largest delay in the entire SSH exchange. This is the server authenticating the password: hashing it, comparing against stored credentials, and performing any PAM/AAA checks. SSH password authentication is inherently sequential — the server must verify before sending USERAUTH_SUCCESS, and the client cannot send anything until it receives that confirmation.
 
@@ -516,38 +519,38 @@ This single step accounts for **~75% of the total connection time**.
 ### Phase 5 — Channel Setup (~197ms, packets 26–45)
 
 ```
-#26  Client  →  Server   48 bytes    SSH_MSG_CHANNEL_OPEN (encrypted)
+#26  Client  →  Server   114 bytes   SSH_MSG_CHANNEL_OPEN (encrypted)
 #27  Server  →  Client   [ACK]
-#28  Server  →  Client   48 bytes    SSH_MSG_CHANNEL_OPEN_CONFIRM (encrypted)
-#29  Client  →  Server   80 bytes    SSH_MSG_CHANNEL_REQUEST - shell/pty (encrypted)
-#30  Server  →  Client   592 bytes   (encrypted — session banner + prompt data)
+#28  Server  →  Client   114 bytes   SSH_MSG_CHANNEL_OPEN_CONFIRM (encrypted)
+#29  Client  →  Server   146 bytes   SSH_MSG_CHANNEL_REQUEST - shell/pty (encrypted)
+#30  Server  →  Client   658 bytes   (encrypted — session banner + prompt data)
 #31  Client  →  Server   [ACK]       — 41ms gap
-     ... many 64-byte encrypted packets — Netmiko prompt detection,
+     ... many 130-byte encrypted packets — Netmiko prompt detection,
          disable paging, find enable mode, prepare shell ...
-#46  Client  →  Server   80 bytes    SSH_MSG_CHANNEL_DATA — command (encrypted)
+#46  Client  →  Server   146 bytes   SSH_MSG_CHANNEL_DATA — command (encrypted)
 ```
 
 After authentication, SSH opens a **channel** — a logical stream within the SSH connection. SSH supports multiple concurrent channels, though Netmiko only uses one. The channel open/confirm (packets 26–28) establishes it, and the channel request (packet 29) asks for a shell or exec environment.
 
-The 592-byte server response (packet 30) contains the EOS login banner and the device prompt, all encrypted. Netmiko must detect the prompt pattern in the decrypted payload to know the shell is ready.
+The 658-byte server response (packet 30) contains the EOS login banner and the device prompt, all encrypted. Netmiko must detect the prompt pattern in the decrypted payload to know the shell is ready.
 
-The subsequent ~40 packets of small 64-byte exchanges are Netmiko's session preparation: disabling terminal paging (`terminal length 0`), confirming the prompt, and navigating to the right privilege level. Each prompt/response round trip requires a full packet exchange. This preparation phase has no equivalent in API-based methods.
+The subsequent ~40 packets of small 130–146-byte exchanges (64–80-byte SSH payloads) are Netmiko's session preparation: disabling terminal paging (`terminal length 0`), confirming the prompt, and navigating to the right privilege level. Each prompt/response round trip requires a full packet exchange. This preparation phase has no equivalent in API-based methods.
 
 ### Phase 6 — Command Execution and Response (~153ms, packets 46–80)
 
 ```
-#46  Client  →  Server   80 bytes    "show interfaces status" (encrypted)
+#46  Client  →  Server   146 bytes   "show interfaces status" (encrypted)
      ... packets 47–70: prompt echo + small encrypted exchanges ...
-#71  Server  →  Client   784 bytes   command output (encrypted)
-#72  Server  →  Client   64 bytes    (encrypted — trailing prompt)
+#71  Server  →  Client   850 bytes   command output (encrypted)
+#72  Server  →  Client   130 bytes   (encrypted — trailing prompt)
 #73  Client  →  Server   [ACK]
      ... packets 74–79: Netmiko reads until prompt detected, sends disconnect ...
 #80  Client  →  Server   [RST]
 ```
 
-The actual command (`show interfaces status`) is sent as a single encrypted packet (packet 46, 80 bytes). The response arrives as two packets: the 784-byte packet (#71) containing the interface table, followed by the device prompt confirming the command completed.
+The actual command (`show interfaces status`) is sent as a single encrypted packet (packet 46, 146 bytes). The response arrives as two packets: the 850-byte packet (#71) containing the interface table, followed by the device prompt confirming the command completed.
 
-**Total response payload: ~784 bytes** — similar to eAPI's 937 bytes in size, as both return the same tabular data. But unlike eAPI where the client knows the response is complete when HTTP returns 200 OK, Netmiko must detect the **prompt string** at the end of the output to know the command has finished. This requires reading and parsing each incoming packet, adding latency.
+**Total response payload: ~784 bytes** — CLI text output, substantially smaller than eAPI's 2,373-byte JSON for the same interface data. The CLI format has no field names, no nesting, and no structure overhead — just an ASCII table. But unlike eAPI where the client knows the response is complete when HTTP returns 200 OK, Netmiko must detect the **prompt string** at the end of the output to know the command has finished. This requires reading and parsing each incoming packet, adding latency.
 
 ### Timing Breakdown
 
@@ -577,6 +580,8 @@ The actual data transfer (784 bytes, ~0.1ms) is trivially fast. The cost is enti
 
 **Port:** 830 | **Protocol:** NETCONF over SSH (RFC 6242) | **Total packets:** 1,130 | **Measured time:** ~2,240ms
 
+> **Wireshark note:** Same as SSH/CLI — SSH session keys are not exportable. All traffic after NEWKEYS (packet #15) is permanently opaque. The NETCONF XML content described in phases 5–8 is derived from ncclient library behaviour and EOS documentation, not from decrypting the capture.
+
 ### Overview: NETCONF Runs Inside SSH
 
 NETCONF is not an independent protocol on the wire — RFC 6242 mandates that it runs as an SSH subsystem. Port 830 is the dedicated IANA port for this, but the transport is identical SSH: the same TCP connection, the same key exchange, the same encrypted channels. This means the full SSH handshake and password authentication cost is paid before a single NETCONF byte is exchanged.
@@ -596,9 +601,9 @@ Standard TCP handshake to port 830. Mechanically identical to the SSH/CLI handsh
 ### Phase 2 — SSH Version Banner Exchange (~28ms, packets 4–7)
 
 ```
-#4   Client  →  Server   24 bytes   "SSH-2.0-paramiko_4.0.0\r\n"
+#4   Client  →  Server   90 bytes   "SSH-2.0-paramiko_4.0.0\r\n"
 #5   Server  →  Client   [ACK]
-#6   Server  →  Client   21 bytes   "SSH-2.0-OpenSSH_9.9\r\n"
+#6   Server  →  Client   87 bytes   "SSH-2.0-OpenSSH_9.9\r\n"
 #7   Client  →  Server   [ACK]
 ```
 
@@ -607,14 +612,14 @@ Same plaintext banner exchange as SSH/CLI. The client identifies as `paramiko_4.
 ### Phase 3 — SSH Key Exchange (~90ms, packets 8–16)
 
 ```
-#8   Server  →  Client   736 bytes    SSH2_MSG_KEXINIT (server algorithm lists)
+#8   Server  →  Client   802 bytes    SSH2_MSG_KEXINIT (server algorithm lists)
 #9   Client  →  Server   [ACK]
-#10  Client  →  Server   1256 bytes   SSH2_MSG_KEXINIT (client algorithm lists)
+#10  Client  →  Server   1322 bytes   SSH2_MSG_KEXINIT (client algorithm lists)
 #11  Server  →  Client   [ACK]       — 41ms gap, server computing ECDH parameters
-#12  Client  →  Server   48 bytes    SSH2_MSG_KEX_ECDH_INIT (client public key)
+#12  Client  →  Server   114 bytes   SSH2_MSG_KEX_ECDH_INIT (client public key)
 #13  Server  →  Client   [ACK]
-#14  Server  →  Client   512 bytes   SSH2_MSG_KEX_ECDH_REPLY (server key + signature)
-#15  Client  →  Server   16 bytes    SSH2_MSG_NEWKEYS
+#14  Server  →  Client   578 bytes   SSH2_MSG_KEX_ECDH_REPLY (server key + signature)
+#15  Client  →  Server   82 bytes    SSH2_MSG_NEWKEYS
 #16  Server  →  Client   [ACK]       — 41ms gap, server computing session keys
 ```
 
@@ -625,46 +630,46 @@ The two 41ms ACK-only gaps — one before the ECDH init and one after NEWKEYS �
 ### Phase 4 — Encrypted Authentication (~1,530ms, packets 17–28)
 
 ```
-#17  Client  →  Server   64 bytes    SSH_MSG_SERVICE_REQUEST (encrypted)
+#17  Client  →  Server   130 bytes   SSH_MSG_SERVICE_REQUEST (encrypted)
 #18  Server  →  Client   [ACK]
-#19  Server  →  Client   64 bytes    SSH_MSG_SERVICE_ACCEPT (encrypted)
-#20  Client  →  Server   96 bytes    SSH_MSG_USERAUTH_REQUEST - username (encrypted)
-#21  Server  →  Client   80 bytes    SSH_MSG_USERAUTH_FAILURE / methods (encrypted)
-#22  Client  →  Server   64 bytes    (encrypted)
-#23  Server  →  Client   64 bytes    (encrypted)
-#24  Client  →  Server   112 bytes   SSH_MSG_USERAUTH_REQUEST - password (encrypted)
-#25  Server  →  Client   80 bytes    (encrypted)
-#26  Client  →  Server   64 bytes    (encrypted)
+#19  Server  →  Client   130 bytes   SSH_MSG_SERVICE_ACCEPT (encrypted)
+#20  Client  →  Server   162 bytes   SSH_MSG_USERAUTH_REQUEST - username (encrypted)
+#21  Server  →  Client   146 bytes   SSH_MSG_USERAUTH_FAILURE / methods (encrypted)
+#22  Client  →  Server   130 bytes   (encrypted)
+#23  Server  →  Client   130 bytes   (encrypted)
+#24  Client  →  Server   178 bytes   SSH_MSG_USERAUTH_REQUEST - password (encrypted)
+#25  Server  →  Client   146 bytes   (encrypted)
+#26  Client  →  Server   130 bytes   (encrypted)
 #27  Server  →  Client   [ACK]       — 41ms gap
      ← 1,474ms gap — server verifying password →
-#28  Server  →  Client   64 bytes    SSH_MSG_USERAUTH_SUCCESS (encrypted)
+#28  Server  →  Client   130 bytes   SSH_MSG_USERAUTH_SUCCESS (encrypted)
 ```
 
-Fully encrypted — contents not visible, only sizes and timing. The pattern mirrors the SSH/CLI capture exactly: all encrypted SSH packets padded to 64-byte multiples, followed by the same **1,474ms gap** for server-side password verification.
+Fully encrypted — contents not visible, only sizes and timing. The pattern mirrors the SSH/CLI capture exactly: all encrypted SSH packets at 130–178-byte frame lengths (64-byte-multiple SSH payloads), followed by the same **1,474ms gap** for server-side password verification.
 
 This single step — password hashing and PAM/AAA checking — accounts for **~65% of the total connection time**. It is identical in both SSH/CLI and NETCONF because the transport layer is the same.
 
 ### Phase 5 — SSH Channel + NETCONF Hello Exchange (~52ms, packets 29–39)
 
 ```
-#29  Client  →  Server   48 bytes    SSH_MSG_CHANNEL_OPEN (encrypted)
+#29  Client  →  Server   114 bytes   SSH_MSG_CHANNEL_OPEN (encrypted)
 #30  Server  →  Client   [ACK]
-#31  Server  →  Client   48 bytes    SSH_MSG_CHANNEL_OPEN_CONFIRM (encrypted)
-#32  Client  →  Server   80 bytes    SSH_MSG_CHANNEL_REQUEST — subsystem=netconf (encrypted)
-#33  Server  →  Client   592 bytes   NETCONF server <hello> (encrypted)
+#31  Server  →  Client   114 bytes   SSH_MSG_CHANNEL_OPEN_CONFIRM (encrypted)
+#32  Client  →  Server   146 bytes   SSH_MSG_CHANNEL_REQUEST — subsystem=netconf (encrypted)
+#33  Server  →  Client   658 bytes   NETCONF server <hello> (encrypted)
 #34  Client  →  Server   [ACK]       — 41ms gap, ncclient parsing server hello
-#35  Server  →  Client   64 bytes    (encrypted — ]]>]]> framing delimiter)
+#35  Server  →  Client   130 bytes   (encrypted — ]]>]]> framing delimiter)
 #36  Client  →  Server   [ACK]
-#37  Client  →  Server   80 bytes    (encrypted)
-#38  Server  →  Client   112 bytes   (encrypted)
-#39  Client  →  Server   1248 bytes  NETCONF client <hello> + <rpc><get> (encrypted)
+#37  Client  →  Server   146 bytes   (encrypted)
+#38  Server  →  Client   178 bytes   (encrypted)
+#39  Client  →  Server   1314 bytes  NETCONF client <hello> + <rpc><get> (encrypted)
 ```
 
 This is the phase that separates NETCONF from SSH/CLI. After the channel is open, the SSH subsystem name `netconf` is requested rather than `shell` or `exec`. The server immediately sends its NETCONF `<hello>` message.
 
-**NETCONF `<hello>` (packet 33, 592 bytes):** The server must advertise all NETCONF capabilities it supports before any RPC can be issued. This is mandatory per RFC 6241 — both sides exchange capability lists and neither can send an RPC until the peer's `<hello>` is received. The server's list includes base NETCONF capabilities and Arista-specific capabilities. At 592 bytes encrypted (much larger when decrypted due to XML verbosity), this is the NETCONF protocol's mandatory overhead — SSH/CLI has no equivalent.
+**NETCONF `<hello>` (packet 33, 658 bytes):** The server must advertise all NETCONF capabilities it supports before any RPC can be issued. This is mandatory per RFC 6241 — both sides exchange capability lists and neither can send an RPC until the peer's `<hello>` is received. The server's list includes base NETCONF capabilities and Arista-specific capabilities. At 658 bytes on the wire, this is the NETCONF protocol's mandatory overhead — SSH/CLI has no equivalent. The size reflects XML's verbosity: a binary encoding of the same capability list would be a fraction of this size.
 
-**ncclient request (packet 39, 1248 bytes):** ncclient sends two XML documents concatenated: the client `<hello>` advertising its own capabilities, followed by the `<rpc>` request — a `<get>` with a subtree filter selecting the `openconfig-interfaces:interfaces` namespace. The entire request is XML:
+**ncclient request (packet 39, 1314 bytes):** ncclient sends two XML documents concatenated: the client `<hello>` advertising its own capabilities, followed by the `<rpc>` request — a `<get>` with a subtree filter selecting the `openconfig-interfaces:interfaces` namespace. The entire request is XML:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -692,7 +697,7 @@ The `]]>]]>` delimiter (11 bytes) is NETCONF's end-of-message marker in base:1.0
 ```
 #40  Server  →  Client   [ACK only]   — 41ms gap
      ← 146ms gap — EOS translating OpenConfig YANG + serialising XML →
-#41  Server  →  Client   1500 bytes   first TCP segment of XML response
+#41  Server  →  Client   1566 bytes   first TCP segment of XML response
 ```
 
 After acknowledging the request, the server goes silent for **187ms total** (41ms + 146ms). This is the deepest server-side processing stack of all six methods:
@@ -705,12 +710,12 @@ This is ~55ms longer than RESTCONF's processing time (which also does YANG trans
 ### Phase 7 — XML Response (~215ms, packets 41–1,123)
 
 ```
-#41    Server  →  Client   1500 bytes   (start of XML response)
+#41    Server  →  Client   1566 bytes   (start of XML response)
 #42    Client  →  Server   [ACK]
-#43    Server  →  Client   1500 bytes
+#43    Server  →  Client   1566 bytes
 #44    Client  →  Server   [ACK]
-... 841 more S→C segments of 1500 bytes, ACK'd in pairs ...
-#1123  Server  →  Client   400 bytes   (final XML segment including ]]>]]> delimiter)
+... 841 more S→C segments of 1566 bytes, ACK'd in pairs ...
+#1123  Server  →  Client   466 bytes   (final XML segment including ]]>]]> delimiter)
 #1124  Client  →  Server   [ACK]
 ```
 
@@ -721,12 +726,12 @@ This is the single most striking measurement in the entire benchmark. Compared t
 | Method      | Response size      |
 |-------------|--------------------|
 | SSH/CLI     | 784 bytes          |
-| eAPI        | 937 bytes          |
+| eAPI        | 2,373 bytes        |
 | RESTCONF    | 23,209 bytes       |
 | gNMI        | 41,409 bytes       |
 | **NETCONF** | **~156,368 bytes** |
 
-NETCONF's response is **167× larger than eAPI** for the same interface data. The size explosion comes from XML's inherent verbosity: every field requires an opening tag, a closing tag, and explicit namespace declarations on each element. The OpenConfig YANG hierarchy adds container nesting (`config`, `state`, `subinterfaces`, etc.), and NETCONF wraps everything in `<rpc-reply>`, `<data>`, and outer namespace declarations. Where eAPI returns `"linkStatus": "connected"`, NETCONF XML returns:
+NETCONF's response is **~66× larger than eAPI** for the same interface data. The size explosion comes from XML's inherent verbosity: every field requires an opening tag, a closing tag, and explicit namespace declarations on each element. The OpenConfig YANG hierarchy adds container nesting (`config`, `state`, `subinterfaces`, etc.), and NETCONF wraps everything in `<rpc-reply>`, `<data>`, and outer namespace declarations. Where eAPI returns `"linkStatus": "connected"`, NETCONF XML returns:
 
 ```xml
 <interfaces xmlns="http://openconfig.net/yang/interfaces">
@@ -743,13 +748,13 @@ NETCONF's response is **167× larger than eAPI** for the same interface data. Th
 
 The 845 TCP segments are transmitted in a rapid burst — TCP handles segmentation automatically. The 215ms transmission time for 156KB on a local subnet is dominated by round-trip ACK latency rather than bandwidth.
 
-### Phase 8 — Session Teardown (~137ms, packets 1,124–1,130)
+### Phase 8 — Session Teardown (~137ms, packets 1,126–1,130)
 
 ```
-#1126  Client  →  Server   256 bytes   SSH close + NETCONF <close-session> (encrypted)
-#1127  Server  →  Client   208 bytes   (encrypted response)
+#1126  Client  →  Server   322 bytes   SSH close + NETCONF <close-session> (encrypted)
+#1127  Server  →  Client   274 bytes   (encrypted response)
 #1128  Client  →  Server   [ACK]
-#1129  Server  →  Client   176 bytes   (encrypted — SSH channel close)
+#1129  Server  →  Client   242 bytes   (encrypted — SSH channel close)
 #1130  Client  →  Server   [ACK+RST]
 ```
 
@@ -809,20 +814,20 @@ Standard TCP handshake to port 23. No TLS context to initialise, no SSL library 
 Telnet uses **IAC (Interpret As Command)** sequences to negotiate terminal options before data flows. IAC is byte `0xFF` (255), followed by a command byte and an option byte. The options are visible in plaintext:
 
 ```
-#4   Server  →  Client   12 bytes
+#4   Server  →  Client   78 bytes
      ff fd 18  — IAC DO  TERMINAL-TYPE
      ff fd 20  — IAC DO  TERMINAL-SPEED
      ff fd 23  — IAC DO  X-DISPLAY-LOCATION
      ff fd 27  — IAC DO  NEW-ENVIRON
 #5   Client  →  Server   [ACK]
      ← 992ms gap — Netmiko sleep() before responding →
-#6   Client  →  Server   3 bytes    ff fc 18  — IAC WONT TERMINAL-TYPE
+#6   Client  →  Server   69 bytes   ff fc 18  — IAC WONT TERMINAL-TYPE
 #7   Server  →  Client   [ACK]
-#8   Client  →  Server   3 bytes    ff fc 20  — IAC WONT TERMINAL-SPEED
+#8   Client  →  Server   69 bytes   ff fc 20  — IAC WONT TERMINAL-SPEED
 #9   Server  →  Client   [ACK]
-#10  Client  →  Server   3 bytes    ff fc 23  — IAC WONT X-DISPLAY-LOCATION
+#10  Client  →  Server   69 bytes   ff fc 23  — IAC WONT X-DISPLAY-LOCATION
 #11  Server  →  Client   [ACK]
-#12  Client  →  Server   3 bytes    ff fc 27  — IAC WONT NEW-ENVIRON
+#12  Client  →  Server   69 bytes   ff fc 27  — IAC WONT NEW-ENVIRON
 #13  Server  →  Client   [ACK]
 ```
 
@@ -833,7 +838,7 @@ The **992ms gap** between packet 4 and packet 6 is a `time.sleep(1)` call in Net
 ### Phase 3 — IAC Option Negotiation Round 2 (~501ms, packets 14–22)
 
 ```
-#14  Server  →  Client   15 bytes
+#14  Server  →  Client   81 bytes
      ff fb 03  — IAC WILL SUPPRESS-GO-AHEAD
      ff fd 01  — IAC DO   ECHO
      ff fd 1f  — IAC DO   NAWS (Window Size)
@@ -841,16 +846,16 @@ The **992ms gap** between packet 4 and packet 6 is a `time.sleep(1)` call in Net
      ff fd 21  — IAC DO   LINEMODE
 #15  Client  →  Server   [ACK]
      ← 501ms gap — Netmiko sleep() before responding →
-#16  Client  →  Server   3 bytes    ff fe 03  — IAC DONT SUPPRESS-GO-AHEAD
-#17  Server  →  Client   3 bytes    ff fb 03  — IAC WILL SUPPRESS-GO-AHEAD  (server insists)
-#18  Client  →  Server   12 bytes
+#16  Client  →  Server   69 bytes   ff fe 03  — IAC DONT SUPPRESS-GO-AHEAD
+#17  Server  →  Client   69 bytes   ff fb 03  — IAC WILL SUPPRESS-GO-AHEAD  (server insists)
+#18  Client  →  Server   78 bytes
      ff fc 01  — IAC WONT ECHO
      ff fc 1f  — IAC WONT NAWS
      ff fe 05  — IAC DONT STATUS
      ff fc 21  — IAC WONT LINEMODE
-#19  Server  →  Client   3 bytes    ff fb 01  — IAC WILL ECHO  (server will handle echo)
+#19  Server  →  Client   69 bytes   ff fb 01  — IAC WILL ECHO  (server will handle echo)
 #20  Client  →  Server   [ACK]       — 41ms gap
-#21  Server  →  Client   10 bytes   "Username: "
+#21  Server  →  Client   76 bytes   "Username: "
 #22  Client  →  Server   [ACK]
 ```
 
@@ -862,9 +867,9 @@ At this point all IAC negotiation is complete. The terminal options were never a
 
 ```
      ← 460ms gap — Netmiko sleep() before sending username →
-#23  Client  →  Server   3 bytes    ff fe 03  — IAC DONT SUPPRESS-GO-AHEAD
+#23  Client  →  Server   69 bytes   ff fe 03  — IAC DONT SUPPRESS-GO-AHEAD
 #24  Server  →  Client   [ACK]       — 42ms gap (server processes)
-#25  Client  →  Server   9 bytes    ff fe 01 61 64 6d 69 6e 0d
+#25  Client  →  Server   75 bytes   ff fe 01 61 64 6d 69 6e 0d
                                     — IAC DONT ECHO, then "admin\r"
 #26  Server  →  Client   [ACK]
 ```
@@ -876,11 +881,11 @@ The **460ms gap** is another Netmiko sleep. Packet 25 is particularly interestin
 ### Phase 5 — Password Entry (~951ms, packets 27–31)
 
 ```
-#27  Server  →  Client   10 bytes   "Password: "
+#27  Server  →  Client   76 bytes   "Password: "
 #28  Client  →  Server   [ACK]
      ← 951ms gap — Netmiko sleep() before sending password →
-#29  Client  →  Server   6 bytes    61 64 6d 69 6e 0d  — "admin\r"
-#30  Server  →  Client   2 bytes    (echo — \r\n)
+#29  Client  →  Server   72 bytes   61 64 6d 69 6e 0d  — "admin\r"
+#30  Server  →  Client   68 bytes   (echo — \r\n)
 #31  Client  →  Server   [ACK]
 ```
 
@@ -892,19 +897,19 @@ In contrast, SSH encrypts everything after the NEWKEYS exchange (packet 12 in th
 
 ```
      ← 1,516ms gap — server verifying credentials + sending login info →
-#32  Server  →  Client   50 bytes   "Last login: Sat Mar 21 18:35:27 from 172.20.20.1"
+#32  Server  →  Client   116 bytes  "Last login: Sat Mar 21 18:35:27 from 172.20.20.1"
 #33  Client  →  Server   [ACK]
-#34  Server  →  Client   4 bytes    "C2A>"    ← device prompt (user privilege level)
+#34  Server  →  Client   70 bytes   "C2A>"    ← device prompt (user privilege level)
 #35  Client  →  Server   [ACK]
      ← 343ms gap — Netmiko processing, prepares to enter enable mode →
-#36  Client  →  Server   6 bytes    "admin\r"  ← Netmiko sends enable password attempt
-#37  Server  →  Client   2 bytes    "ad"       ← server echo
+#36  Client  →  Server   72 bytes   "admin\r"  ← Netmiko sends enable password attempt
+#37  Server  →  Client   68 bytes   "ad"       ← server echo
 #38  Client  →  Server   [ACK]
-#39  Server  →  Client   3 bytes    "min"      ← echo continues
+#39  Server  →  Client   69 bytes   "min"      ← echo continues
      ... echo completes ...
-#43  Server  →  Client   15 bytes   "% Invalid input"
+#43  Server  →  Client   81 bytes   "% Invalid input"
 #44  Client  →  Server   [ACK]
-#47  Server  →  Client   4 bytes    "C2A>"    ← prompt returned
+#47  Server  →  Client   70 bytes   "C2A>"    ← prompt returned
 #48  Client  →  Server   [ACK]
 ```
 
@@ -912,21 +917,20 @@ The **1,516ms gap** is the server verifying the password — the same credential
 
 After the prompt appears, Netmiko attempts to enter privileged mode by sending the enable password (`admin\r`). EOS at the `>` prompt level interprets this as a CLI command — which does not exist — and returns `% Invalid input`. Netmiko detects the prompt after the error and continues.
 
-Note that the server echoes commands character-by-character in small packets (2 bytes, 3 bytes) — this is Telnet's character-mode echo, visible in packets 37–42. SSH hides all of this inside the encrypted channel.
+Note that the server echoes commands character-by-character in small packets (68 bytes, 69 bytes frame lengths for 2–3 byte payloads) — this is Telnet's character-mode echo, visible in packets 37–42. SSH hides all of this inside the encrypted channel.
 
 ### Phase 7 — Session Preparation (~994ms, packets 49–81)
 
 ```
      ← 994ms gap — Netmiko sleep() before sending terminal setup →
-#49  Client  →  Server   2 bytes    "\r\n"
-#50  Server  →  Client   2 bytes    (echo)
+#49  Client  →  Server   68 bytes   "\r\n"
+#50  Server  →  Client   68 bytes   (echo)
      ...
-#54  Client  →  Server   20 bytes   "terminal width 511\r"
+#54  Client  →  Server   86 bytes   "terminal width 511\r"
 #55–61: Server echoes command + "Width set to 511 columns." + prompt
-#67  Client  →  Server   19 bytes   "terminal length 0\r"
+#67  Client  →  Server   85 bytes   "terminal length 0\r"
 #68–70: Server echoes + "terminal length 0\nPagination disabled.\nC2A>"
      ... additional prompt-detection round trips (#71–81) ...
-#82  Client  →  Server   24 bytes   "show interfaces status\r"
 ```
 
 The **994ms gap** is another Netmiko sleep between prompt detection and sending the terminal setup commands. Netmiko then sends `terminal width 511` and `terminal length 0` (disable paging) — the same session preparation it performs over SSH, but here fully visible in plaintext. Each command produces a round-trip echo cycle that SSH hides inside the encrypted channel.
@@ -934,22 +938,22 @@ The **994ms gap** is another Netmiko sleep between prompt detection and sending 
 ### Phase 8 — Command Execution and Response (~110ms, packets 82–95)
 
 ```
-#82  Client  →  Server   24 bytes   "show interfaces status\r"
-#83  Server  →  Client   4 bytes    "show"  ← echo starts
+#82  Client  →  Server   90 bytes   "show interfaces status\r"
+#83  Server  →  Client   70 bytes   "show"  ← echo starts
 #84  Client  →  Server   [ACK]       — 40ms gap (server processing command)
-#85  Server  →  Client   755 bytes  command output (plaintext)
+#85  Server  →  Client   821 bytes  command output (plaintext)
 #86  Client  →  Server   [ACK]
-#87  Client  →  Server   2 bytes    "\r\n"
-#88  Server  →  Client   2 bytes    (echo)
+#87  Client  →  Server   68 bytes   "\r\n"
+#88  Server  →  Client   68 bytes   (echo)
      ... Netmiko reads until prompt detected ...
-#90  Server  →  Client   4 bytes    "C2A>"  ← prompt confirms output complete
-#92  Client  →  Server   6 bytes    "exit\r"
+#90  Server  →  Client   70 bytes   "C2A>"  ← prompt confirms output complete
+#92  Client  →  Server   72 bytes   "exit\r"
 #93  Client  →  Server   [FIN+ACK]
 #94  Server  →  Client   [FIN+ACK]
 #95  Client  →  Server   [ACK]
 ```
 
-The `show interfaces status` command output arrives in a single 755-byte packet — completely readable in Wireshark, no decryption required:
+The `show interfaces status` command output arrives in a single 821-byte packet — completely readable in Wireshark, no decryption required:
 
 ```
 Port       Name    Status       Vlan     Duplex Speed  Type
@@ -1014,12 +1018,12 @@ The same interface data returned by each method, measured in bytes on the wire:
 
 | Method    | Response size    | Relative to eAPI |
 |-----------|------------------|------------------|
-| SSH/CLI   | 784 bytes        | 0.8×             |
-| Telnet    | 755 bytes        | 0.8×             |
-| eAPI      | 937 bytes        | 1×               |
-| RESTCONF  | 23,209 bytes     | 25×              |
-| gNMI      | 41,409 bytes     | 44×              |
-| NETCONF   | ~156,368 bytes   | 167×             |
+| SSH/CLI   | 784 bytes        | 0.3×             |
+| Telnet    | 755 bytes        | 0.3×             |
+| eAPI      | 2,373 bytes      | 1×               |
+| RESTCONF  | 23,209 bytes     | ~10×             |
+| gNMI      | 41,409 bytes     | ~17×             |
+| NETCONF   | ~156,368 bytes   | ~66×             |
 
 CLI methods (SSH, Telnet) return the smallest payloads because they return raw text output — no structure overhead, just the table as printed. eAPI returns compact native JSON. RESTCONF and gNMI return standards-compliant OpenConfig JSON with full YANG namespace annotations and container hierarchies. NETCONF's XML multiplies that same YANG structure by the verbosity factor of angle-bracketed tag pairs on every field.
 
