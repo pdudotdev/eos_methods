@@ -18,8 +18,9 @@ management api http-commands
 
 ! 3. RESTCONF — OpenConfig REST interface
 !
-! Step A: Generate a self-signed certificate (run from privileged exec)
+! Step A: Generate self-signed certificates (run from privileged exec)
 !   security pki certificate generate self-signed restconf.crt key restconf.key generate rsa 2048 parameters common-name restconf
+!   security pki certificate generate self-signed gnmi.crt key gnmi.key generate rsa 2048 parameters common-name gnmi subject-alternative-name ip 172.20.20.208
 !
 ! Step B: Create the SSL profile and bind the cert/key
 management security

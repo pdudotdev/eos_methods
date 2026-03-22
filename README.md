@@ -4,11 +4,11 @@
 Testing CLI/SSH, NETCONF, RESTCONF, gNMI, eAPI (and Telnet 😝) on Arista EOS.
 
 Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods necessary for network automation purposes:
-- CLI/SSH
-- RESTCONF
-- NETCONF
-- gNMI
-- eAPI
+- CLI - SSH
+- RESTCONF - HTTPS
+- NETCONF - SSH
+- gNMI - gRPC over TLS
+- eAPI (JSON-RPC) - HTTPS
 - *+ Telnet (just for fun)*
 
 ## Steps
