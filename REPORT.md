@@ -550,7 +550,7 @@ The actual command (`show interfaces status`) is sent as a single encrypted pack
 
 Three compounding factors:
 
-1. **Password authentication (1.476s):** Sequential server-side credential verification with no parallelism possible. This is inherent to SSH password auth — key-based auth would be faster but still requires a round trip.
+1. **Password authentication (1.476s):** Sequential server-side credential verification with no parallelism possible. This is inherent to SSH password auth — see the key-auth note below for why switching to key-based auth provides no measurable improvement on this platform.
 2. **Netmiko session preparation:** Disabling paging, detecting prompts, and preparing the shell adds hundreds of milliseconds of prompt-wait cycles with no equivalent in API methods.
 3. **Prompt-based response detection:** Unlike HTTP which has a `Content-Length` header to know when data is complete, SSH/CLI relies on detecting the device prompt — requiring pattern matching on each received packet.
 
@@ -760,7 +760,7 @@ ncclient sends a NETCONF `<close-session>` RPC followed by the SSH channel close
 | SSH channel + NETCONF hello            | #28–39          | ~52ms       |
 | Server processing (YANG + XML)         | #40–41          | ~187ms      |
 | XML response (156KB, 845 segments)     | #41–1,123       | ~215ms      |
-| Session teardown                       | #1,124–1,130    | ~137ms      |
+| Session teardown                       | #1,126–1,130    | ~137ms      |
 | **Total**                              |                 | **~2,240ms**|
 
 ### Why NETCONF Is the Most Verbose Method
@@ -769,7 +769,7 @@ Three compounding factors:
 
 1. **Same SSH auth cost as SSH/CLI (1,474ms):** NETCONF runs inside SSH, so the full password authentication penalty applies — no way to avoid it.
 2. **NETCONF hello overhead:** Both sides must complete a capability exchange before any RPC can proceed. This is a protocol requirement with no equivalent in eAPI, RESTCONF, or gNMI.
-3. **XML response size (156KB):** XML's tag-pair verbosity and mandatory namespace declarations on every element produce a response 167× larger than eAPI. The same OpenConfig data that RESTCONF returns as 23KB of JSON becomes 156KB of XML. Every additional TCP segment adds latency through the ACK cycle.
+3. **XML response size (156KB):** XML's tag-pair verbosity and mandatory namespace declarations on every element produce a response ~66× larger than eAPI. The same OpenConfig data that RESTCONF returns as 23KB of JSON becomes 156KB of XML. Every additional TCP segment adds latency through the ACK cycle.
 
 In environments using NETCONF operationally, response size is managed through subtree filters (requesting only specific nodes rather than the full interfaces tree), chunked framing (base:1.1), and persistent sessions (eliminating the SSH handshake and hello exchange per query). The 156KB response measured here represents the worst case: a full OpenConfig interfaces tree dump over a fresh connection.
 
