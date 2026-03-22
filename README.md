@@ -1,11 +1,10 @@
 # EOS Methods - Weekend Fun Experiment
 
 ## 📖 **Table of Contents**
-- 📜 **EOS Methods**
-  - [📄 Summary](#-summary)
-  - [📋 Steps](#-steps)
-  - [📍 Final Report](#-final-report)
-  - [⚠️ Disclaimer](#️-disclaimer)
+- [📄 Summary](#-summary)
+- [📋 Steps](#-steps)
+- [📍 Final Report](#-final-report)
+- [⚠️ Disclaimer](#️-disclaimer)
 
 ## 📄 Summary
 Testing CLI/SSH, NETCONF, RESTCONF, gNMI, eAPI (and Telnet 😝) on Arista EOS.
@@ -76,7 +75,7 @@ pip install -r requirements.txt
 - Query outputs are saved to `arista_benchmark_results.txt`
 - Findings and lessons learned, saved to `findings/findings.md`
 - You can also run **Wireshark** to see more details (GEEK!)
-  - [x] Check out my own PCAPs under `pcaps/`
+  - [x] Check out the PCAPs in `pcaps/`
 
 **Have fun! 🤓**
 
