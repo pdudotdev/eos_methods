@@ -1,6 +1,13 @@
 # EOS Methods - Weekend Fun Experiment
 
-## Summary
+## 📖 **Table of Contents**
+- 📜 **EOS Methods**
+  - [📄 Summary](#-summary)
+  - [📋 Steps](#-steps)
+  - [📍 Final Report](#-final-report)
+  - [⚠️ Disclaimer](#️-disclaimer)
+
+## 📄 Summary
 Testing CLI/SSH, NETCONF, RESTCONF, gNMI, eAPI (and Telnet 😝) on Arista EOS.
 
 Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods (*+ Telnet, just for fun*) necessary for network automation:
@@ -14,7 +21,7 @@ Luckily, Arista provides us with the chance to download and test its OS [**for f
   | SSH/CLI | 22 | SSHv2 | Plain text — CLI output | Encrypted (SSHv2) |                                                                                                                                                         
   | Telnet/CLI | 23 | Telnet | Plain text — CLI output | **None — plaintext** |
 
-## Steps
+## 📋 Steps
 - Have an Arista EOS device up and reachable
 - See all the necessary configuration [**here**](eos_setup/eos_setup.txt)
 - Create a venv: 
@@ -73,8 +80,8 @@ pip install -r requirements.txt
 
 **Have fun! 🤓**
 
-## Conclusions
-- Read my article in [**WRITEUP.md**](WRITEUP.md)
+## 📍 Final Report
+- See the full [**REPORT.md**](REPORT.md)
 
-## Disclaimer
+## ⚠️ Disclaimer
 Educational purposes only. License MIT.
