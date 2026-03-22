@@ -39,7 +39,7 @@ Measured end-to-end time from TCP SYN to final packet (Python client on same LAN
 |------|-------------------------|------------|---------|------|
 | 1    | eAPI (HTTPS JSON-RPC)   | ~97ms      | 19      | 443  |
 | 2    | RESTCONF (HTTPS REST)   | ~110ms     | 25      | 6020 |
-| 3    | gNMI (gRPC/HTTP2/TLS)   | ~263ms     | 50      | 6030 |
+| 3    | gNMI (gRPC/HTTP2/TLS)   | ~234ms     | 41      | 6030 |
 | 4    | SSH/CLI (Netmiko)       | ~1,967ms   | 80      | 22   |
 | 5    | NETCONF (ncclient)      | ~2,240ms   | 1,130   | 830  |
 | 6    | Telnet/CLI (Netmiko)    | ~6,444ms   | 95      | 23   |
@@ -287,158 +287,140 @@ The TLS handshake cost is essentially identical between the two methods. The dif
 
 ## 3. gNMI — gRPC over HTTP/2 over TLS 1.3
 
-**Port:** 6030 | **Protocol:** gRPC over HTTP/2 over TLS 1.3 | **Total packets:** 50 across 2 connections | **Measured time:** ~263ms
+**Port:** 6030 | **Protocol:** gRPC over HTTP/2 over TLS 1.3 | **Total packets:** 41 | **Measured time:** ~234ms
 
 > **TLS decryption note:** `grpcio` uses **BoringSSL** — Google's fork of OpenSSL — which does not write to `SSLKEYLOGFILE`. The TLS keys for this connection are not in `tls_keys.log`. To see plaintext gNMI traffic, temporarily switch the device back to insecure gNMI (no SSL profile) and recapture.
 
-### Overview: Two TCP Connections
+> **Certificate note:** The device's gNMI TLS certificate is pinned locally as `pcaps/gnmi.crt` and passed to pygnmi via `path_cert`. This eliminates the certificate-retrieval TCP session that pygnmi would otherwise open before the real gRPC channel — a saving of ~36ms per call. To re-export the certificate from the device (e.g. after a cert rotation):
+> ```bash
+> # Fetch the certificate presented on the gNMI port and save as PEM
+> openssl s_client -connect 172.20.20.208:6030 </dev/null 2>/dev/null \
+>     | openssl x509 -outform PEM > pcaps/gnmi.crt
+>
+> # Verify the CN and SAN match the device IP
+> openssl x509 -in pcaps/gnmi.crt -noout -subject -ext subjectAltName
+> ```
 
-The gNMI capture contains **two separate TCP connections** to port 6030. The first is a short-lived TLS session ending in a client RST after only the handshake. The second is the full gRPC session.
-
-This is **documented pygnmi behaviour**: when no local certificate file is provided (`path_cert` not specified), pygnmi opens a raw SSL socket to the server, completes enough of the TLS handshake to receive the server's certificate (which arrives in the ServerHello flight), extracts it, then RSTs the connection. That certificate is then used as the trusted CA root when creating the actual gRPC secure channel. Two TCP connections are therefore always made in this configuration.
-
-### Connection 1 — Certificate Retrieval (~15ms, packets 1–9, port 49230)
+### Phase 1 — TCP 3-Way Handshake (~0.05ms, packets 1–3)
 
 ```
-#1   Client  →  Server   [SYN]
-#2   Server  →  Client   [SYN-ACK]
-#3   Client  →  Server   [ACK]
-#4   Client  →  Server   [TLS ClientHello]       583 bytes
+#1   Client  →  Server   74 bytes   [SYN]
+#2   Server  →  Client   74 bytes   [SYN-ACK]
+#3   Client  →  Server   66 bytes   [ACK]
+```
+
+### Phase 2 — TLS 1.3 Handshake (~19ms, packets 4–15)
+
+```
+#4   Client  →  Server   316 bytes  TLS ClientHello           +4ms (pygnmi credential setup)
 #5   Server  →  Client   [ACK]
-#6   Server  →  Client   [TLS ServerHello+...]   1479 bytes  ← certificate is here
+#6   Server  →  Client   1530 bytes TLS ServerHello+Cert+...  +6.7ms
 #7   Client  →  Server   [ACK]
-#8   Client  →  Server   [TLS Finished]           130 bytes
-#9   Client  →  Server   [RST]                               ← certificate extracted, done
+#8   Client  →  Server   130 bytes  TLS key exchange material
+#9   Client  →  Server   170 bytes  TLS
+#10  Client  →  Server   170 bytes  TLS Certificate + Finished
+#11  Server  →  Client   [ACK]
+#12  Server  →  Client   78 bytes   TLS NewSessionTicket
+#13  Server  →  Client   109 bytes  TLS
+#14  Server  →  Client   97 bytes   TLS
+#15  Client  →  Server   97 bytes   TLS Finished
 ```
 
-pygnmi needs the server's certificate to configure `grpc.ssl_channel_credentials()` before creating the gRPC channel. Since the certificate arrives inside the TLS ServerHello flight (packet #6, 1479 bytes), pygnmi only needs to complete enough of the handshake to receive it. Once the client sends its TLS Finished (packet #8) and the handshake is complete, the certificate has been extracted — the connection is immediately reset (packet #9) because its purpose is fulfilled.
+The 4ms gap before the ClientHello (packet #4) is pygnmi setting up `grpc.ssl_channel_credentials()` using the locally-pinned certificate — zero TCP connections required. The ServerHello flight (packet #6, 1530 bytes) carries the device certificate, server extensions, and server Finished in a single TLS record burst. The server sends a NewSessionTicket (packet #12) for potential future session resumption.
 
-The RST is not an error. It is a deliberate close once certificate extraction is complete. This first connection costs approximately **15ms** of overhead before the real gRPC session starts.
+### Phase 3 — HTTP/2 + gRPC Setup (~0.8ms, packets 16–19)
 
-### Connection 2 — gRPC Session (packets 10–50)
-
-After the RST there is a ~21ms gap while pygnmi builds the gRPC channel credentials using the extracted certificate.
-
-#### TCP 3-Way Handshake (~0.04ms, packets 10–12)
+This is the layer that fundamentally separates gNMI from eAPI and RESTCONF. HTTP/2 requires a connection negotiation round-trip before any gNMI data can be requested:
 
 ```
-#10  Client  →  Server   [SYN]
-#11  Server  →  Client   [SYN-ACK]
-#12  Client  →  Server   [ACK]
-```
-
-#### TLS 1.3 Handshake (~23ms, packets 13–20)
-
-```
-#13  Client  →  Server   [TLS ClientHello]       583 bytes   +5.2ms
-#14  Server  →  Client   [ACK]
-#15  Server  →  Client   [TLS ServerHello+...]   1521 bytes  +15ms
-#16  Client  →  Server   [ACK]
-#17  Client  →  Server   [TLS Finished]           130 bytes
-#18  Client  →  Server   [HTTP/2 preface]         170 bytes
-#19  Server  →  Client   [ACK]
-#20  Server  →  Client   [TLS NewSessionTicket]   109 bytes
-```
-
-The ServerHello is larger here (1521 vs 1479 bytes) because the gRPC TLS negotiation path under BoringSSL uses slightly different cipher and extension sets compared to the Python SSL socket used in connection 1.
-
-After sending its TLS Finished (packet #17), the client **immediately piggybacks the HTTP/2 connection preface** (packet #18, 170 bytes) without waiting for the server to respond — TLS 1.3 allows this since both sides already hold the session keys. The server sends a NewSessionTicket (packet #20, 109 bytes) for potential future session resumption.
-
-#### HTTP/2 + gRPC Setup (~5ms, packets 21–25)
-
-This is the layer that fundamentally separates gNMI from eAPI and RESTCONF. HTTP/2 requires a full connection negotiation before any gNMI data can be requested:
-
-```
-#21  Client  →  Server   97 bytes   HTTP/2 SETTINGS ACK
-#22  Server  →  Client   97 bytes   HTTP/2 SETTINGS ACK
-#23  Client  →  Server   374 bytes  HTTP/2 HEADERS + DATA
+#16  Client  →  Server   384 bytes  HTTP/2 SETTINGS + gRPC HEADERS + DATA
                                     └─ HEADERS: gRPC method, path (/gnmi.gNMI/Get)
                                     └─ DATA: protobuf-encoded gNMI GetRequest for /interfaces
-#24  Server  →  Client   118 bytes  HTTP/2 SETTINGS + response HEADERS (status 200)
-#25  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE (flow control)
+#17  Server  →  Client   [ACK]
+#18  Server  →  Client   118 bytes  HTTP/2 SETTINGS (server side)
+#19  Client  →  Server   105 bytes  HTTP/2 SETTINGS ACK
 ```
 
-The **HTTP/2 SETTINGS exchange** (packets #18–#22) is mandatory — both endpoints negotiate stream parameters (max concurrent streams, flow control window size, max frame size, header compression table) before any RPC proceeds. This requires one full round trip that HTTP/1.1 methods (eAPI, RESTCONF) simply don't pay.
+The client combines its HTTP/2 SETTINGS, gRPC HEADERS, and the gNMI GetRequest DATA into a single 384-byte packet (#16). The **HTTP/2 SETTINGS exchange** (packets #16–#19) is mandatory — both endpoints negotiate stream parameters (max concurrent streams, flow control window sizes, max frame size) before any RPC proceeds. This requires one full round trip that HTTP/1.1 methods (eAPI, RESTCONF) simply don't pay.
 
-**WINDOW_UPDATE frames** (packet #25 and others) carry no application data — they are HTTP/2's flow control mechanism, signalling how much data the receiver can accept at any given time.
+The gRPC request is a **protobuf-encoded gNMI GetRequest** for path `/interfaces` inside an HTTP/2 DATA frame, with `encoding=JSON_IETF` specified in the request.
 
-The gRPC request (packet #23) is a **protobuf-encoded gNMI GetRequest** for path `/interfaces` inside an HTTP/2 DATA frame.
-
-#### Server Processing (~115ms across two phases, packets 26 and 38)
+### Phase 4 — Server Processing (~73ms, packet 20)
 
 ```
-#26  Server  →  Client   [ACK only — 41ms gap]   ← initial YANG translation + encoding
-...
-#38  Server  →  Client   [ACK only — 41ms gap]   ← encoding second half of response
+#20  Server  →  Client   [ACK only]   ← 41ms gap then 32ms until burst 1
 ```
 
-Two ACK-only packets, each preceded by a ~41ms gap. The device is translating EOS native interface state through the OpenConfig YANG model and additionally encoding the result into protobuf gNMI Notification/Update structures — the deepest model translation stack of all six methods. The response arrives in two separate bursts with the second processing phase happening between them: the server encodes part of the response, sends it, then continues encoding the remainder before sending the second burst.
+A single ACK-only packet during the ~73ms the device spends translating EOS native interface state through the OpenConfig YANG model and encoding the result into protobuf gNMI Notification/Update structures with JSON_IETF-encoded YANG values — the deepest model translation stack of all six methods.
 
-#### gNMI Response — Two Bursts (packets 27–43)
-
-```
-── Burst 1 (~17KB, ~2ms) ──
-#27  Server  →  Client   4832 bytes
-#29  Server  →  Client   6018 bytes
-#30  Server  →  Client   6801 bytes
-#28/#31  Client  →  Server   [ACK + WINDOW_UPDATE]
-#32  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE
-#34  Server  →  Client   105 bytes  HTTP/2 DATA (continued)
-#35  Client  →  Server   216 bytes  HTTP/2 WINDOW_UPDATE / PING
-#36  Server  →  Client   118 bytes
-#37  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE
-     ← #38: server ACK only — 41ms processing gap (second half encoding) →
-── Burst 2 (~24KB, ~0.1ms) ──
-#39  Server  →  Client   10762 bytes
-#40  Server  →  Client   11948 bytes
-#41  Server  →  Client   1444 bytes
-#42/#43  Client  →  Server   [ACK]   ← TCP delayed ACK timer (~41ms)
-```
-
-**Total response payload: ~41,409 bytes** — the largest payload of all six methods in raw bytes, though NETCONF's XML exceeds it in total wire size.
-
-The size is explained by the encoding: `encoding="json"` in the script causes the device to return JSON-encoded OpenConfig data **nested inside** protobuf gNMI Notification/Update wrapper structures. The YANG model data is as verbose as RESTCONF's (23KB) and the protobuf framing adds overhead on top. With `encoding="proto"`, all field names would be replaced with compact integer tags and the response would be substantially smaller — typical for production gNMI telemetry.
-
-#### Connection Teardown (packets 44–50)
+### Phase 5 — gNMI Response — Two Bursts (packets 21–36)
 
 ```
-#44  Client  →  Server   105 bytes  HTTP/2 GOAWAY frame
-#45  Server  →  Client   [ACK]
-#46  Server  →  Client   105 bytes  HTTP/2 GOAWAY response
-#47  Client  →  Server   [ACK]
-#48  Client  →  Server   [FIN+ACK]
-#49  Server  →  Client   90 bytes   TLS close_notify
-#50  Client  →  Server   [RST]
+── Burst 1 (~17KB, ~0.5ms) ──
+#21  Server  →  Client   4832 bytes
+#22  Client  →  Server   [ACK]
+#23  Server  →  Client   6018 bytes
+#24  Server  →  Client   6801 bytes
+#25  Client  →  Server   [ACK]
+#26  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE
+#27  Server  →  Client   [ACK]
+#28  Server  →  Client   105 bytes  HTTP/2 WINDOW_UPDATE
+── HTTP/2 flow control + 2nd-half server encoding (~28ms) ──
+#29  Client  →  Server   218 bytes  HTTP/2 WINDOW_UPDATE
+#30  Server  →  Client   118 bytes
+#31  Client  →  Server   105 bytes  HTTP/2 WINDOW_UPDATE ACK
+── Burst 2 (~24KB, ~0.2ms) ──
+#32  Server  →  Client   10762 bytes
+#33  Client  →  Server   [ACK]
+#34  Server  →  Client   11948 bytes
+#35  Server  →  Client   1449 bytes
+#36  Client  →  Server   [ACK]
 ```
 
-gRPC uses HTTP/2's **GOAWAY frame** (packets #44–#46) for graceful stream shutdown before the TCP FIN — an explicit protocol-level close sequence absent in HTTP/1.1 methods.
+**Total response payload: ~41,414 bytes** — the largest payload of all six methods in raw bytes, though NETCONF's XML exceeds it in total wire size.
+
+The size is explained by the encoding: `encoding="json_ietf"` causes the device to return namespace-qualified JSON-encoded OpenConfig data **nested inside** protobuf gNMI Notification/Update wrapper structures. The YANG model data is as verbose as RESTCONF's (23KB) and the protobuf framing adds overhead on top. `encoding="proto"` would replace all field names with compact integer tags and substantially reduce the response — but this cEOS version supports only `json`, `json_ietf`, and `ascii`; proto encoding is available on physical EOS hardware platforms.
+
+**WINDOW_UPDATE frames** (packets #26, #28, #29, #31) carry no application data — they are HTTP/2's flow control mechanism, signalling how much additional data the receiver can accept. The ~28ms between bursts reflects the server encoding the second half of the response after sending the first.
+
+### Phase 6 — Connection Teardown (packets 37–41)
+
+```
+#37  Client  →  Server   105 bytes  HTTP/2 GOAWAY frame       ← ~73ms after burst 2
+#38  Server  →  Client   105 bytes  HTTP/2 GOAWAY response
+#39  Client  →  Server   [ACK]
+#40  Server  →  Client   90 bytes   TLS close_notify
+#41  Client  →  Server   [RST]
+```
+
+The ~73ms gap before packet #37 is pygnmi decoding 41KB of JSON-in-protobuf into Python data structures after receiving the full response. gRPC uses HTTP/2's **GOAWAY frame** (packets #37–#38) for graceful stream shutdown before the TCP FIN — an explicit protocol-level close sequence absent in HTTP/1.1 methods.
 
 ### Timing Breakdown
 
-| Phase                                            | Packets   | Duration    |
-|--------------------------------------------------|-----------|-------------|
-| Connection 1 — certificate retrieval (TCP+TLS+RST)| #1–9    | ~15ms       |
-| Gap — pygnmi builds gRPC credentials from cert   | —         | ~21ms       |
-| TCP handshake (connection 2)                     | #10–12    | ~0.04ms     |
-| TLS 1.3 handshake                                | #13–20    | ~23ms       |
-| HTTP/2 + gRPC setup (SETTINGS, HEADERS)          | #21–25    | ~5ms        |
-| Server processing — initial (YANG + protobuf)    | #26       | ~74ms       |
-| gNMI response burst 1 (17KB)                     | #27–37    | ~2ms        |
-| Server processing — continued                    | #38       | ~41ms       |
-| gNMI response burst 2 (24KB) + delayed ACK       | #39–43    | ~41ms       |
-| HTTP/2 GOAWAY + TCP teardown                     | #44–50    | ~25ms       |
-| **Total**                                        |           | **~263ms**  |
+| Phase                                              | Packets   | Duration    |
+|----------------------------------------------------|-----------|-------------|
+| TCP handshake                                      | #1–3      | ~0.05ms     |
+| pygnmi credential setup (pre-ClientHello)          | —         | ~4ms        |
+| TLS 1.3 handshake                                  | #4–15     | ~15ms       |
+| HTTP/2 + gRPC setup (SETTINGS, HEADERS)            | #16–19    | ~0.8ms      |
+| Server processing (YANG translation + encoding)    | #20       | ~73ms       |
+| gNMI response burst 1 (17KB)                       | #21–28    | ~0.5ms      |
+| HTTP/2 flow control + server 2nd-half encoding     | #29–31    | ~28ms       |
+| gNMI response burst 2 (24KB)                       | #32–36    | ~0.2ms      |
+| pygnmi protobuf decode                             | —         | ~73ms       |
+| HTTP/2 GOAWAY + TCP teardown                       | #37–41    | ~27ms       |
+| **Total**                                          |           | **~234ms**  |
 
 ### Why gNMI Has More Overhead Than RESTCONF
 
 Despite both performing the same YANG model translation:
 
-1. **Certificate retrieval connection** (packets #1–9): ~36ms of overhead before the real session starts (~15ms for conn 1 + ~21ms for pygnmi to build credentials). Avoidable by providing `path_cert` pointing to a local copy of the server certificate.
-2. **HTTP/2 SETTINGS negotiation** (packets #18–22): Mandatory round trip before any RPC can proceed — absent in HTTP/1.1.
-3. **Larger response** (packets #27–41): 41KB vs 23KB due to JSON-in-protobuf encoding. `encoding="proto"` would reduce this significantly.
-4. **Deeper server-side encoding:** YANG translation + protobuf wrapping adds overhead vs RESTCONF's pure YANG-to-JSON translation.
+1. **HTTP/2 SETTINGS negotiation** (packets #16–19): Mandatory round trip before any RPC can proceed — absent in HTTP/1.1.
+2. **Larger response** (packets #21–35): 41KB vs 23KB due to `json_ietf`-in-protobuf encoding. `encoding="proto"` would reduce this significantly on supported platforms — this cEOS version supports only `json`, `json_ietf`, and `ascii`.
+3. **Deeper server-side encoding:** YANG translation + protobuf wrapping adds overhead vs RESTCONF's pure YANG-to-JSON translation.
+4. **Client-side decode cost:** pygnmi spends ~73ms decoding the 41KB protobuf response before issuing GOAWAY — this overhead does not appear in eAPI or RESTCONF where the application layer (JSON) is parsed incrementally.
 
-In production with a locally-pinned certificate (eliminating connection 1), protobuf encoding, and persistent channels (gNMI supports long-lived streaming — no reconnect per query), gNMI is typically the highest-throughput method for continuous telemetry collection.
+⚠️ With persistent channels (gNMI supports long-lived streaming — no reconnect per query), items 1 and 4 amortise across thousands of polls. On physical EOS hardware (and other platforms that support `encoding="proto"`), item 2 drops further — compact protobuf field tags replace verbose JSON key strings. For continuous telemetry collection at scale, gNMI is typically the highest-throughput method.
 
 *Sources: [pygnmi client.py](https://github.com/akarneliuk/pygnmi/blob/master/pygnmi/client.py) · [pygnmi GitHub](https://github.com/akarneliuk/pygnmi)*
 
@@ -573,6 +555,12 @@ Three compounding factors:
 3. **Prompt-based response detection:** Unlike HTTP which has a `Content-Length` header to know when data is complete, SSH/CLI relies on detecting the device prompt — requiring pattern matching on each received packet.
 
 The actual data transfer (784 bytes, ~0.1ms) is trivially fast. The cost is entirely in the session establishment and interaction model.
+
+### Key-Based Auth — Lab Result
+
+Key-based authentication was tested against this device (ed25519 key, `username admin ssh-key` configured). The measured time was **~1,932ms** — virtually identical to password auth (~1,967ms). Packet capture confirmed why: after the client sends its signed public key auth request, there is a **~1,473ms gap** before EOS responds with auth success. This gap is the same duration as the password-auth delay, and with no TACACS+/RADIUS servers configured (pure local auth), it is EOS's own SSH authentication processing overhead applied uniformly regardless of auth method. Key auth eliminates the password exchange round trip but not this server-side delay.
+
+On real EOS hardware or different EOS versions this behaviour may differ. For this cEOS lab platform, key auth provides no measurable timing benefit.
 
 ---
 
@@ -728,7 +716,7 @@ This is the single most striking measurement in the entire benchmark. Compared t
 | SSH/CLI     | 784 bytes          |
 | eAPI        | 2,373 bytes        |
 | RESTCONF    | 23,209 bytes       |
-| gNMI        | 41,409 bytes       |
+| gNMI        | 41,414 bytes       |
 | **NETCONF** | **~156,368 bytes** |
 
 NETCONF's response is **~66× larger than eAPI** for the same interface data. The size explosion comes from XML's inherent verbosity: every field requires an opening tag, a closing tag, and explicit namespace declarations on each element. The OpenConfig YANG hierarchy adds container nesting (`config`, `state`, `subinterfaces`, etc.), and NETCONF wraps everything in `<rpc-reply>`, `<data>`, and outer namespace declarations. Where eAPI returns `"linkStatus": "connected"`, NETCONF XML returns:
@@ -1022,12 +1010,12 @@ The same interface data returned by each method, measured in bytes on the wire:
 | Telnet    | 755 bytes        | 0.3×             |
 | eAPI      | 2,373 bytes      | 1×               |
 | RESTCONF  | 23,209 bytes     | ~10×             |
-| gNMI      | 41,409 bytes     | ~17×             |
+| gNMI      | 41,414 bytes     | ~17×             |
 | NETCONF   | ~156,368 bytes   | ~66×             |
 
 CLI methods (SSH, Telnet) return the smallest payloads because they return raw text output — no structure overhead, just the table as printed. eAPI returns compact native JSON. RESTCONF and gNMI return standards-compliant OpenConfig JSON with full YANG namespace annotations and container hierarchies. NETCONF's XML multiplies that same YANG structure by the verbosity factor of angle-bracketed tag pairs on every field.
 
-The gNMI response is larger than RESTCONF's despite both querying the same YANG model because `encoding="json"` wraps the JSON data inside protobuf gNMI Notification/Update envelopes. With `encoding="proto"`, gNMI would return the most compact result of all standards-based methods.
+The gNMI response is larger than RESTCONF's despite both querying the same YANG model because `encoding="json_ietf"` wraps the JSON data inside protobuf gNMI Notification/Update envelopes. `encoding="proto"` would make gNMI the most compact of all standards-based methods — but this cEOS version supports only `json`, `json_ietf`, and `ascii`; proto encoding requires physical EOS hardware.
 
 ### Server Processing Time
 
@@ -1037,12 +1025,12 @@ Time the device spent computing the response, measured as silence between reques
 |----------|-------------------|---------------------------------------------|
 | eAPI     | ~32ms             | Native EOS command execution, direct JSON   |
 | RESTCONF | ~56ms             | YANG model traversal + JSON serialisation   |
-| gNMI     | ~115ms (2 phases) | YANG traversal + protobuf encoding          |
+| gNMI     | ~73ms             | YANG traversal + protobuf encoding          |
 | NETCONF  | ~187ms            | YANG traversal + XML serialisation          |
 | SSH/CLI  | ~40ms (per cmd)   | CLI execution only, no model work           |
 | Telnet   | ~40ms             | CLI execution only, no model work           |
 
-The ~24ms gap between eAPI and RESTCONF is a direct measurement of OpenConfig model translation cost. The further ~130ms from RESTCONF to NETCONF is the cost of XML serialisation over JSON for the same model data. gNMI's two-phase processing (encoding half the response, sending it, then encoding the rest) is visible as two distinct 41ms gaps in the capture.
+The ~24ms gap between eAPI and RESTCONF is a direct measurement of OpenConfig model translation cost. The further ~130ms from RESTCONF to NETCONF is the cost of XML serialisation over JSON for the same model data. gNMI's two-phase processing (encoding half the response, sending it, then encoding the rest) is visible in the capture: a ~73ms gap before burst 1, and a ~23ms gap between bursts while the server encodes the second half.
 
 ### Where the Time Goes
 
@@ -1050,7 +1038,7 @@ The ~24ms gap between eAPI and RESTCONF is a direct measurement of OpenConfig mo
 |----------|--------|---------------------------|-------------------|-------------------|-------------|
 | eAPI     | ~97ms  | ~57ms (SSL ctx + TLS)     | —                 | ~32ms             | ~7ms        |
 | RESTCONF | ~110ms | ~50ms (SSL ctx + TLS)     | —                 | ~56ms             | ~2ms        |
-| gNMI     | ~263ms | ~64ms (cert + TLS + HTTP2)| —                 | ~115ms            | ~43ms       |
+| gNMI     | ~234ms | ~20ms (TLS + HTTP2)       | —                 | ~73ms             | ~28ms tx + ~73ms decode |
 | SSH/CLI  | ~1,967ms| ~74ms (banner + kex)    | ~1,476ms (passwd) | ~40ms             | ~200ms prep + ~150ms cmd |
 | NETCONF  | ~2,240ms| ~170ms (banner + kex)   | ~1,474ms (passwd) | ~187ms            | ~215ms      |
 | Telnet   | ~6,444ms| ~1ms (raw TCP)          | ~3,898ms (sleeps) + ~1,516ms (passwd) | ~40ms | ~110ms |
@@ -1061,13 +1049,13 @@ For API-based methods (eAPI, RESTCONF, gNMI), the dominant cost is split between
 
 **eAPI is the fastest because it does the least work.** No model translation, no protocol negotiation overhead beyond TLS, and the smallest response payload. For operational polling of Arista-specific data, it is the right default choice.
 
-**RESTCONF and gNMI trade raw speed for standards compliance.** Both query the same OpenConfig YANG model and return structured, vendor-neutral data. The overhead — ~24–130ms of additional server processing and 25–44× larger payloads — buys portability across vendors and compatibility with OpenConfig tooling.
+**RESTCONF and gNMI trade raw speed for standards compliance.** Both query the same OpenConfig YANG model and return structured, vendor-neutral data. The overhead — ~24–41ms of additional server processing and ~10–17× larger payloads — buys portability across vendors and compatibility with OpenConfig tooling.
 
-**SSH password authentication is the single largest bottleneck** across SSH/CLI and NETCONF. At ~1.47 seconds, it accounts for the majority of both methods' total time. Key-based authentication eliminates the PAM/AAA round trip and would cut SSH/CLI time to ~500ms and NETCONF to ~770ms in this setup.
+**SSH authentication processing is the single largest bottleneck** across SSH/CLI and NETCONF. At ~1.47 seconds, it accounts for the majority of both methods' total time. Key-based authentication was tested and measured at ~1,932ms — no improvement — because on this cEOS platform EOS applies the same ~1.47s server-side auth processing delay regardless of auth method (see key-auth note in the SSH/CLI section).
 
 **NETCONF's 156KB XML response** is the extreme case of a well-known trade-off: XML is human-readable, schema-validated, and unambiguous, but pays a steep verbosity tax. In production, subtree filters and chunked framing (NETCONF base:1.1) reduce payload size dramatically; persistent sessions eliminate the SSH handshake and hello exchange per query.
 
-**gNMI is architecturally the best fit for streaming telemetry.** The one-time setup cost (certificate retrieval, TLS, HTTP/2 SETTINGS) amortises across a persistent channel. Production deployments with `encoding="proto"` and a pre-pinned certificate avoid both the cert-retrieval connection and the JSON-in-protobuf overhead, making gNMI the highest-throughput method for continuous data collection.
+**gNMI is architecturally the best fit for streaming telemetry.** The one-time setup cost (TLS handshake, HTTP/2 SETTINGS) amortises across a persistent channel. With `path_cert` pre-pinning the device certificate (as in this benchmark), the additional cert-retrieval TCP session pygnmi would otherwise open is already eliminated. On physical EOS hardware — which supports `encoding="proto"` unlike this cEOS lab platform — the JSON-in-protobuf overhead drops further, making gNMI the highest-throughput method for continuous data collection.
 
 **Telnet should not exist in production networks.** The plaintext credential exposure is a hard security disqualifier independent of performance. The 6.4-second round trip is a secondary concern.
 
