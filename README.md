@@ -3,7 +3,7 @@
 ## Summary
 Testing CLI/SSH, NETCONF, RESTCONF, gNMI, eAPI (and Telnet 😝) on Arista EOS.
 
-Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods necessary for network automation purposes:
+Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods necessary for network automation:
 - CLI - SSH
 - RESTCONF - HTTPS
 - NETCONF - SSH
@@ -66,8 +66,12 @@ pip install -r requirements.txt
 - Query outputs are saved to `arista_benchmark_results.txt`
 - Findings and lessons learned, saved to `findings/findings.md`
 - You can also run **Wireshark** to see more details (GEEK!)
+  - [x] Check out my own PCAPs under `pcaps/`
 
 **Have fun! 🤓**
+
+## Conclusions
+- Read my article in [**WRITEUP.md**](WRITEUP.md)
 
 ## Disclaimer
 Educational purposes only. License MIT.
