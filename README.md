@@ -3,13 +3,16 @@
 ## Summary
 Testing CLI/SSH, NETCONF, RESTCONF, gNMI, eAPI (and Telnet 😝) on Arista EOS.
 
-Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods necessary for network automation:
-- CLI - SSH
-- RESTCONF - HTTPS
-- NETCONF - SSH
-- gNMI - gRPC over TLS
-- eAPI (JSON-RPC) - HTTPS
-- *+ Telnet (just for fun)*
+Luckily, Arista provides us with the chance to download and test its OS [**for free**](https://www.arista.com/en/login), and on top of that EOS supports 5 data retrieval methods (*+ Telnet, just for fun*) necessary for network automation:
+
+| Method | Port | Transport | Data Format | Security |                                                                                                                                                                         
+  |---|---|---|---|---|                                                                                                                                                                                                        
+  | eAPI | 443 | HTTP/1.1 over TLS 1.3 | JSON-RPC — native EOS schema | Encrypted (TLS 1.3) |                                                                                                                                    
+  | RESTCONF | 6020 | HTTP/1.1 over TLS 1.3 | JSON — YANG / OpenConfig | Encrypted (TLS 1.3) |                                                                                                                                   
+  | gNMI | 6030 | gRPC over HTTP/2 over TLS 1.3 | Protobuf / JSON — YANG / OpenConfig | Encrypted (TLS 1.3) |                                                                                                                    
+  | NETCONF | 830 | SSHv2 subsystem | XML — YANG / OpenConfig | Encrypted (SSHv2) |                                                                                                                                              
+  | SSH/CLI | 22 | SSHv2 | Plain text — CLI output | Encrypted (SSHv2) |                                                                                                                                                         
+  | Telnet/CLI | 23 | Telnet | Plain text — CLI output | **None — plaintext** |
 
 ## Steps
 - Have an Arista EOS device up and reachable

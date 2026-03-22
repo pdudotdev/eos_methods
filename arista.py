@@ -57,7 +57,7 @@ SWITCH_PARAMS = {
     "verify_ssl": False,
 }
 
-OUTPUT_FILE = "findings/arista_benchmark_results.txt"
+OUTPUT_FILE = "notes/arista_benchmark_results.txt"
 
 
 @dataclass
