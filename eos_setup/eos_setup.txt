@@ -27,7 +27,7 @@ management security
    ssl profile restconf
       certificate restconf.crt key restconf.key
    ssl profile gnmi
-      certificate restconf.crt key restconf.key
+      certificate gnmi.crt key gnmi.key
 !
 ! Step C: Enable RESTCONF with the SSL profile
 management api restconf

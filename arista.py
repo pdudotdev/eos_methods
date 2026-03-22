@@ -30,6 +30,7 @@ import time
 import datetime
 import concurrent.futures
 import warnings
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -55,9 +56,43 @@ SWITCH_PARAMS = {
     "ssh_port": 22,
     "telnet_port": 23,
     "verify_ssl": False,
+    "gnmi_cert": "findings/pcaps/gnmi.crt",  # pinned cert — eliminates Connection 1
 }
 
 OUTPUT_FILE = "notes/arista_benchmark_results.txt"
+
+
+def _oc_ifaces_summary(ifaces: list) -> str:
+    """Render an OpenConfig interface list as a compact status table."""
+    if not ifaces:
+        return "(no interface data)"
+    rows = [f"{'Interface':<20} {'Description':<22} {'Admin':<8} {'Oper'}", "-" * 62]
+    for iface in ifaces:
+        name  = iface.get("name") or (iface.get("config") or {}).get("name", "?")
+        desc  = ((iface.get("config") or {}).get("description", "") or "")[:22]
+        state = iface.get("state") or {}
+        admin = state.get("admin-status", "?")
+        oper  = state.get("oper-status", "?")
+        rows.append(f"{name:<20} {desc:<22} {admin:<8} {oper}")
+    return "\n".join(rows)
+
+
+def _netconf_xml_summary(xml_str: str) -> str:
+    """Extract interface status table from a NETCONF XML rpc-reply."""
+    try:
+        root = ET.fromstring(xml_str)
+        ns = "http://openconfig.net/yang/interfaces"
+        ifaces = []
+        for iface in root.iter(f"{{{ns}}}interface"):
+            name  = iface.findtext(f"{{{ns}}}name", "?")
+            desc  = iface.findtext(f"{{{ns}}}config/{{{ns}}}description", "") or ""
+            admin = iface.findtext(f"{{{ns}}}state/{{{ns}}}admin-status", "?")
+            oper  = iface.findtext(f"{{{ns}}}state/{{{ns}}}oper-status", "?")
+            ifaces.append({"name": name, "config": {"description": desc},
+                           "state": {"admin-status": admin, "oper-status": oper}})
+        return _oc_ifaces_summary(ifaces)
+    except Exception as exc:
+        return f"(XML parse error: {exc})\n{xml_str[:500]}"
 
 
 @dataclass
@@ -162,7 +197,8 @@ def connect_restconf(params: dict) -> ConnectionResult:
         data = resp.json()
         result.success = True
         result.data = data
-        result.raw_output = json.dumps(data, indent=2)
+        ifaces = data.get("openconfig-interfaces:interface", [])
+        result.raw_output = _oc_ifaces_summary(ifaces)
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
@@ -191,7 +227,7 @@ def connect_netconf(params: dict) -> ConnectionResult:
             response = m.get(filter=("subtree", iface_filter))
             output = response.xml
         result.success = True
-        result.raw_output = output
+        result.raw_output = _netconf_xml_summary(output)
         result.data = {"source": "NETCONF get (openconfig-interfaces:interfaces)"}
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
@@ -208,20 +244,34 @@ def connect_gnmi(params: dict) -> ConnectionResult:
     result = ConnectionResult(method="gNMI (pygnmi/gRPC)")
     start = time.perf_counter()
     try:
+        # path_cert pins the device certificate locally, eliminating the
+        # first TCP connection pygnmi uses to retrieve it at runtime.
+        # encoding="json_ietf" is the standards-compliant OpenConfig encoding
+        # (namespace-qualified keys). This EOS version does not support proto
+        # encoding; on platforms that do, proto would be significantly smaller.
+        # In production, the gNMIclient would be kept alive across queries
+        # (persistent channel) to avoid paying TLS + HTTP/2 setup per call.
         with gNMIclient(
             target=(params["host"], params["gnmi_port"]),
             username=params["username"],
             password=params["password"],
-            insecure=False,
-            skip_verify=True,
+            path_cert=params["gnmi_cert"],
         ) as gc:
             gnmi_result = gc.get(
                 path=["/interfaces"],
-                encoding="json",
+                encoding="json_ietf",
             )
         result.success = True
         result.data = gnmi_result
-        result.raw_output = json.dumps(gnmi_result, indent=2, default=str)
+        try:
+            val = gnmi_result["notification"][0]["update"][0]["val"]
+            ifaces = (
+                val.get("openconfig-interfaces:interface")
+                or val.get("interface", [])
+            )
+        except (KeyError, IndexError):
+            ifaces = []
+        result.raw_output = _oc_ifaces_summary(ifaces)
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     finally:
