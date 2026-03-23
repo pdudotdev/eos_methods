@@ -22,7 +22,7 @@ Luckily, Arista provides us with the chance to download and test its OS [**for f
 
 ## 📋 Steps
 - Have an Arista EOS device up and reachable
-- See all the necessary configuration [**here**](eos_setup/eos_setup.txt)
+- See all the necessary EOS configs [**here**](eos_setup/eos_setup.txt)
 - Create a venv: 
 ```
 python3 -m venv arista
