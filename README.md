@@ -44,21 +44,20 @@ pip install -r requirements.txt
   Starting all 6 connections simultaneously...
   Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI | Telnet
 
-
   All connections completed in 6.7608s (wall clock)
 
   Rank   Method                         Time (s)     Status
   ------------------------------------------------------------
-  1      eAPI (HTTPS JSON-RPC)          0.0990       OK
-  2      RESTCONF (HTTPS REST)          0.1228       OK
-  3      gNMI (pygnmi/gRPC)             0.2454       OK
-  4      SSH/CLI (Netmiko)              1.9482       OK
-  5      NETCONF (ncclient)             2.3284       OK
-  6      Telnet/CLI (Netmiko)           6.3079       OK
+  1      eAPI (HTTPS JSON-RPC)          0.0970       OK
+  2      RESTCONF (HTTPS REST)          0.1100       OK
+  3      gNMI (pygnmi/gRPC)             0.2340       OK
+  4      SSH/CLI (Netmiko)              1.9670       OK
+  5      NETCONF (ncclient)             2.2400       OK
+  6      Telnet/CLI (Netmiko)           6.4440       OK
 
   Full report written to: notes/arista_benchmark_results.txt
 ```
-- Run 500 tests, get the average: `python benchmark_runner.py`
+- Run `RUNS = 500` tests, get the average: `python benchmark_runner.py`
 ```
   Completed 500 runs
 
@@ -73,17 +72,17 @@ pip install -r requirements.txt
 
 ```
 - Query outputs are saved to `notes/arista_benchmark_results.txt`
-- Findings and lessons learned, saved to `findings/findings.md`
-- You can also run **Wireshark** to see more details (GEEK!)
-  - [x] Check out the PCAPs in `pcaps/`
+- You can also run **Wireshark** to see more details (*GEEK!*)
+  - [x] Use the filters provided [**here**](https://github.com/pdudotdev/eos_methods/blob/main/notes/notes.md)
+  - [x] Or check out the PCAPs in `pcaps/`
 
 **Have fun! 🤓**
 
 ## 📍 Final Report
 - See the full [**REPORT.md**](REPORT.md)
-- or just [**REPORT_TLDR**](REPORT_TLDR.md)
+- ... or just [**REPORT_TLDR.md**](REPORT_TLDR.md)
 
 ## ⚠️ Disclaimer
-Educational purposes only. License MIT.
-
 **Lab context:** Results are from an Arista **cEOS 4.35.0F** lab in **containerlab**, client and device on the same local subnet. Rankings and absolute times may differ on physical EOS hardware (which supports gNMI `encoding="proto"`, reducing gNMI's response size significantly), over WAN or high-latency links, with TACACS+/RADIUS authentication (adds network RTT to every SSH/NETCONF connection), on different EOS versions, or with other vendors.
+
+Educational purposes only. License MIT.
