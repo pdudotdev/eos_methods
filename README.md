@@ -36,12 +36,12 @@ pip install -r requirements.txt
 - Run the test once: `python arista.py`
 ```
 ============================================================
-  Arista Switch -- 5-Method Concurrent Benchmark
+  Arista Switch -- 6-Method Concurrent Benchmark
   Target: 172.20.20.208
   Query : show interfaces status
 ============================================================
 
-  Starting all 5 connections simultaneously...
+  Starting all 6 connections simultaneously...
   Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI | Telnet
 
 
@@ -56,23 +56,23 @@ pip install -r requirements.txt
   5      NETCONF (ncclient)             2.3284       OK
   6      Telnet/CLI (Netmiko)           6.3079       OK
 
-  Full report written to: findings/arista_benchmark_results.txt
+  Full report written to: notes/arista_benchmark_results.txt
 ```
-- Run 100 tests, get the average: `python benchmark_runner.py`
+- Run 500 tests, get the average: `python benchmark_runner.py`
 ```
-  Completed 100 runs
+  Completed 500 runs
 
   Rank   Method                         Avg Time (s)   Success Rate
   -----------------------------------------------------------------
-  1      eAPI (HTTPS JSON-RPC)          0.0965         100/100
-  2      RESTCONF (HTTPS REST)          0.1256         100/100
-  3      gNMI (pygnmi/gRPC)             0.2479         100/100
-  4      SSH/CLI (Netmiko)              1.9713         100/100
-  5      NETCONF (ncclient)             2.3871         100/100
-  6      Telnet/CLI (Netmiko)           6.4224         100/100
+  1      eAPI (HTTPS JSON-RPC)          0.0990         500/500
+  2      RESTCONF (HTTPS REST)          0.1178         500/500
+  3      gNMI (pygnmi/gRPC)             0.2641         500/500
+  4      SSH/CLI (Netmiko)              1.9690         500/500
+  5      NETCONF (ncclient)             2.3410         500/500
+  6      Telnet/CLI (Netmiko)           6.4105         500/500
 
 ```
-- Query outputs are saved to `arista_benchmark_results.txt`
+- Query outputs are saved to `notes/arista_benchmark_results.txt`
 - Findings and lessons learned, saved to `findings/findings.md`
 - You can also run **Wireshark** to see more details (GEEK!)
   - [x] Check out the PCAPs in `pcaps/`
@@ -81,6 +81,9 @@ pip install -r requirements.txt
 
 ## 📍 Final Report
 - See the full [**REPORT.md**](REPORT.md)
+- or just [**REPORT_TLDR**](REPORT_TLDR.md)
 
 ## ⚠️ Disclaimer
 Educational purposes only. License MIT.
+
+**Lab context:** Results are from an Arista **cEOS 4.35.0F** lab in **containerlab**, client and device on the same local subnet. Rankings and absolute times may differ on physical EOS hardware (which supports gNMI `encoding="proto"`, reducing gNMI's response size significantly), over WAN or high-latency links, with TACACS+/RADIUS authentication (adds network RTT to every SSH/NETCONF connection), on different EOS versions, or with other vendors.
