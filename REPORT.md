@@ -704,7 +704,8 @@ This is ~55ms longer than RESTCONF's processing time (which also does YANG trans
 #44    Client  →  Server   [ACK]
 ... 841 more S→C segments of 1566 bytes, ACK'd in pairs ...
 #1123  Server  →  Client   466 bytes   (final XML segment including ]]>]]> delimiter)
-#1124  Client  →  Server   [ACK]
+#1124  Client  →  Server   [ACK]        (SACK {157622:158022}, win 29 — selective ack of retransmitted segment)
+#1125  Client  →  Server   [ACK]        (window update only: win 29 → 61, length 0 — client drained buffer, advertising more space)
 ```
 
 **Total response payload: ~156,368 bytes (~156KB)**
@@ -755,9 +756,9 @@ ncclient sends a NETCONF `<close-session>` RPC followed by the SSH channel close
 | TCP handshake                          | #1–3            | ~0.07ms     |
 | SSH banner exchange                    | #4–7            | ~28ms       |
 | SSH key exchange                       | #8–16           | ~90ms       |
-| SSH authentication                     | #17–27          | ~56ms       |
+| SSH authentication                     | #17–28          | ~56ms       |
 | Password auth (server-side)            | —               | ~1,474ms    |
-| SSH channel + NETCONF hello            | #28–39          | ~52ms       |
+| SSH channel + NETCONF hello            | #29–39          | ~52ms       |
 | Server processing (YANG + XML)         | #40–41          | ~187ms      |
 | XML response (156KB, 845 segments)     | #41–1,123       | ~215ms      |
 | Session teardown                       | #1,126–1,130    | ~137ms      |

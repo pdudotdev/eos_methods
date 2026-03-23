@@ -399,11 +399,11 @@ def generate_report(results: list[ConnectionResult], params: dict) -> str:
 # ──────────────────────────────────────────────
 def main():
     print(f"\n{'=' * 60}")
-    print("  Arista Switch -- 5-Method Concurrent Benchmark")
+    print("  Arista Switch -- 6-Method Concurrent Benchmark")
     print(f"  Target: {SWITCH_PARAMS['host']}")
     print(f"  Query : show interfaces status")
     print(f"{'=' * 60}\n")
-    print("  Starting all 5 connections simultaneously...")
+    print("  Starting all 6 connections simultaneously...")
     print("  Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI | Telnet\n")
 
     overall_start = time.perf_counter()
