@@ -56,7 +56,7 @@ SWITCH_PARAMS = {
     "ssh_port": 22,
     "telnet_port": 23,
     "verify_ssl": False,
-    "gnmi_cert": "findings/pcaps/gnmi.crt",  # pinned cert — eliminates Connection 1
+    "gnmi_cert": "pcaps/gnmi.crt",  # pinned cert — eliminates Connection 1
 }
 
 OUTPUT_FILE = "notes/arista_benchmark_results.txt"
@@ -255,7 +255,7 @@ def connect_gnmi(params: dict) -> ConnectionResult:
             target=(params["host"], params["gnmi_port"]),
             username=params["username"],
             password=params["password"],
-            path_cert=params["gnmi_cert"],
+            path_cert=params["gnmi_cert"], # or `insecure=True` to unpin the certificate
         ) as gc:
             gnmi_result = gc.get(
                 path=["/interfaces"],
