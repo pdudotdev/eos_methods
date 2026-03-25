@@ -1,0 +1,62 @@
+name: CI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest
+      - name: Run unit and integration tests
+        run: python -m pytest testing/test_unit.py testing/test_integration.py -v --tb=short
+
+  # ── Release ──────────────────────────────────────────────────────────────
+  # Triggered only on version tags (e.g. v1.0.0).
+  # Runs after CI passes, extracts the changelog section, creates a GitHub Release.
+  #
+  # Usage:
+  #   git tag v1.0.0
+  #   git push origin v1.0.0
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          semver="${{ steps.version.outputs.tag }}"
+          semver="${semver#v}"
+          awk "/^## v${semver}/{found=1; next} /^## v/{if(found) exit} found" CHANGELOG.md > /tmp/release_notes.md
+          cat /tmp/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: /tmp/release_notes.md
