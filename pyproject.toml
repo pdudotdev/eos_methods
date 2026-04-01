@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+markers = [
+    "live: connects to a real Arista switch (requires --live flag)",
+]
+testpaths = ["testing"]

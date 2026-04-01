@@ -1,29 +1,20 @@
-"""
-Shared fixtures for the arista.py test suite.
-
-Adds the project root to sys.path so `import arista` works,
-and provides reusable test data for unit and integration tests.
-The --live flag is registered here (root conftest) so pytest
-recognises it before collecting subdirectories.
-"""
+"""Shared fixtures for the arista.py test suite."""
 import sys
 from pathlib import Path
 
-# arista.py is a standalone script, not a package — put its directory on sys.path
+# arista.py is a standalone script — put its directory on sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from arista import ConnectionResult
 
 
-# ── CLI flag: --live (must live in root conftest) ───────────────
+# ── CLI flag: --live ──────────────────────────────────────────
 
 def pytest_addoption(parser):
     parser.addoption("--live", action="store_true", default=False, help="run live device tests")
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip tests marked @pytest.mark.live unless --live is passed."""
     if config.getoption("--live"):
         return
     skip = pytest.mark.skip(reason="need --live flag to run")
@@ -32,9 +23,11 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+# ── Fixtures ──────────────────────────────────────────────────
+
 @pytest.fixture
 def sample_params():
-    """Minimal SWITCH_PARAMS-shaped dict for tests that never hit the network."""
+    """Minimal SWITCH_PARAMS dict for tests that never hit the network."""
     return {
         "host": "10.0.0.1",
         "username": "admin",
@@ -91,20 +84,3 @@ def sample_netconf_xml():
         "</interfaces>"
         "</data>"
     )
-
-
-@pytest.fixture
-def make_result():
-    """Factory fixture — creates a ConnectionResult with customizable fields."""
-    def _make(**kwargs):
-        defaults = {
-            "method": "TestMethod",
-            "success": True,
-            "elapsed_seconds": 1.0,
-            "data": None,
-            "error": None,
-            "raw_output": "test output",
-        }
-        defaults.update(kwargs)
-        return ConnectionResult(**defaults)
-    return _make
