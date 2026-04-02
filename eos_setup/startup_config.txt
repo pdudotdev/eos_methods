@@ -1,0 +1,145 @@
+! Command: show running-config
+! device: C2A (cEOSLab, EOS-4.35.0F-44178984.4350F (engineering build))
+!
+! Generate self-signed certificates (run from privileged exec)
+!   security pki certificate generate self-signed eapi.crt key eapi.key generate rsa 2048 parameters common-name eapi subject-alternative-name ip 172.20.20.208
+!   security pki certificate generate self-signed rest.crt key rest.key generate rsa 2048 parameters common-name rest subject-alternative-name ip 172.20.20.208
+!   security pki certificate generate self-signed gnmi.crt key gnmi.key generate rsa 2048 parameters common-name gnmi subject-alternative-name ip 172.20.20.208
+!   security pki certificate generate self-signed sshx.crt key sshx.key generate rsa 2048 parameters common-name sshx subject-alternative-name ip 172.20.20.208
+!
+no aaa root
+!
+username admin privilege 15 role network-admin secret sha512 $6$WYIFji2gEpzUYRcO$.HuCO/Do2vQ1JnfpBEFWA5BSFXR1/JD74PVx5HheEI.7fR6ptlnfCD0oJNGrNdPMl9mC.dS64fgNGKgKsQXmE/
+username admin ssh-key ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCUha5vrs929HNxvsn09MOESCZ3ck2jPceBgQXAxUJbjPzrZ00cCu5hb/sq7tqTCw1HCnOMm+hrl3YQXhsOMzAM6AY06Abp3YdrzSDYUIVBqjZsmf/j601B+I2ONyc8HN3tbuv62H6WqXxzZpUqp7IX/t7Ei7NVm06IL3mLFEfdXZpaGE5b/aMLtqHmlmICq1Vr8z51iRAd18ZH11yGJWVT8KDHRcVwNOyKwMAK5ievAGg2w3gcLWeotDtIm4KiZ17PyoZqQbjsHvr/iUBcZs6SNwLVzyQYyLR5O6uVvQyKc/Es3tGWv2ie2zl9vTpHnshSFnSy6MuGYcBu8ruK20fv mcp@mcp
+!
+management api http-commands
+   protocol https ssl profile eapi
+   no shutdown
+!
+no service interface inactive port-id allocation disabled
+!
+transceiver qsfp default-mode 4x10G
+!
+service routing protocols model multi-agent
+!
+logging host 172.20.20.1
+logging format rfc5424
+!
+hostname C2A
+!
+snmp-server engineID local f5717f001c73bbee4b00
+snmp-server view IFVIEW iso included
+snmp-server group NETOPS v3 priv read IFVIEW
+snmp-server user benchmark NETOPS v3 localized f5717f001c73bbee4b00 auth sha 5e278c73991608df065b88f3712999777e32743c priv aes 5e278c73991608df065b88f371299977
+!
+spanning-tree mode mstp
+!
+system l1
+   unsupported speed action error
+   unsupported error-correction action error
+!
+vrf instance VRF1
+!
+management api gnmi
+   transport grpc default
+      ssl profile gnmi
+!
+management api netconf
+   transport ssh default
+!
+management api restconf
+   transport https test
+      ssl profile restconf
+!
+management security
+   ssl profile eapi
+      certificate eapi.crt key eapi.key
+   !
+   ssl profile gnmi
+      certificate gnmi.crt key gnmi.key
+   !
+   ssl profile restconf
+      certificate rest.crt key rest.key
+   !
+   ssl profile sshx
+      certificate sshx.crt key sshx.key
+!
+interface Ethernet1
+   description TO-DC1A
+   no switchport
+   vrf VRF1
+   ip address 10.0.0.42/30
+!
+interface Ethernet2
+   description TO-D2B
+   no switchport
+   vrf VRF1
+   ip address 10.0.0.18/30
+!
+interface Ethernet3
+   description TO-D1C
+   no switchport
+   vrf VRF1
+   ip address 10.0.0.10/30
+!
+interface Ethernet4
+   description TO-C1J
+   no switchport
+   vrf VRF1
+   ip address 10.0.0.22/30
+!
+interface Ethernet5
+   description TO-E1C
+   no switchport
+   vrf VRF1
+   ip address 10.0.0.33/30
+!
+interface Ethernet6
+   description TO-E2C
+   no switchport
+   vrf VRF1
+   ip address 10.0.0.37/30
+!
+interface Management0
+   ip address 172.20.20.208/24
+   ipv6 address 3fff:172:20:20::7/64
+   ipv6 address 3fff:172:20:20::e/64
+!
+ip access-list OPEN
+   10 permit ip any any
+!
+ip routing
+ip routing vrf VRF1
+!
+system control-plane
+   ip access-group OPEN in
+!
+ip route 0.0.0.0/0 172.20.20.1
+!
+ipv6 route ::/0 3fff:172:20:20::1
+!
+ntp server 172.20.20.1 prefer
+!
+router multicast
+   ipv4
+      software-forwarding kernel
+   !
+   ipv6
+      software-forwarding kernel
+!
+router ospf 1 vrf VRF1
+   router-id 22.22.22.22
+   network 10.0.0.0/24 area 0.0.0.0
+   max-lsa 12000
+!
+management ssh
+   idle-timeout 15
+   !
+   authentication x509
+      server ssl profile sshx
+      username domain omit
+!
+management telnet
+   no shutdown
+!
+end

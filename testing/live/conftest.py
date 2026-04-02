@@ -18,7 +18,7 @@ def live_results():
 
 @pytest.fixture(autouse=True, scope="session")
 def write_live_md(live_results):
-    """After all live tests complete, write testing/live.md with results."""
+    """After all live tests complete, write testing/live/live.md with results."""
     yield
 
     if not live_results:
@@ -67,5 +67,5 @@ def write_live_md(live_results):
 
     lines.append("")
 
-    md_path = Path(__file__).resolve().parent.parent / "live.md"
+    md_path = Path(__file__).resolve().parent / "live.md"
     md_path.write_text("\n".join(lines))

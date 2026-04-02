@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Arista Switch - 5-Method Concurrent Connection Benchmark
+Arista Switch - 7-Method Concurrent Connection Benchmark
 =========================================================
 Connects to an Arista EOS switch simultaneously via:
   1. SSH/CLI   (using Netmiko)
@@ -8,11 +8,14 @@ Connects to an Arista EOS switch simultaneously via:
   3. RESTCONF  (using requests - HTTPS REST)
   4. NETCONF   (using ncclient)
   5. gNMI      (using pygnmi)
+  6. SNMPv3    (using pysnmp - USM authPriv)
+  7. Telnet    (using Netmiko)
 
 All methods query for interface status information.
-SSH and eAPI use "show interfaces status" directly.
+SSH, eAPI, and Telnet use "show interfaces status" directly.
 RESTCONF, NETCONF, and gNMI use the equivalent OpenConfig path:
   /openconfig-interfaces:interfaces
+SNMPv3 walks IF-MIB::ifTable for interface name, admin, and oper status.
 
 Prerequisites
 -------------
@@ -41,6 +44,7 @@ import logging
 logging.getLogger("pygnmi").setLevel(logging.CRITICAL)
 os.environ["GRPC_VERBOSITY"] = "NONE"
 os.environ["GRPC_TRACE"] = ""
+os.environ.setdefault("SSLKEYLOGFILE", "pcaps/tls_keys.log")
 
 # ──────────────────────────────────────────────
 # CONFIGURATION — Edit these to match your switch
@@ -55,8 +59,14 @@ SWITCH_PARAMS = {
     "gnmi_port": 6030,
     "ssh_port": 22,
     "telnet_port": 23,
-    "verify_ssl": False,
-    "gnmi_cert": "pcaps/gnmi.crt",  # pinned cert — eliminates Connection 1
+    "ssh_key": "secrets/ssh_key",
+    "eapi_cert": "secrets/eapi.crt",
+    "restconf_cert": "secrets/rest.crt",
+    "gnmi_cert": "secrets/gnmi.crt",
+    "snmpv3_user": "benchmark",
+    "snmpv3_auth_key": "admin1234",
+    "snmpv3_priv_key": "admin1234",
+    "snmpv3_port": 161,
 }
 
 OUTPUT_FILE = "notes/arista_benchmark_results.txt"
@@ -117,7 +127,8 @@ def connect_ssh_cli(params: dict) -> ConnectionResult:
             "device_type": "arista_eos",
             "host": params["host"],
             "username": params["username"],
-            "password": params["password"],
+            "use_keys": True,
+            "key_file": params["ssh_key"],
             "port": params["ssh_port"],
             "timeout": 30,
         }
@@ -157,7 +168,7 @@ def connect_eapi(params: dict) -> ConnectionResult:
         resp = requests.post(
             url, json=payload,
             auth=HTTPBasicAuth(params["username"], params["password"]),
-            verify=params["verify_ssl"], timeout=30,
+            verify=params["eapi_cert"], timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -191,7 +202,7 @@ def connect_restconf(params: dict) -> ConnectionResult:
         resp = requests.get(
             url, headers=headers,
             auth=HTTPBasicAuth(params["username"], params["password"]),
-            verify=params["verify_ssl"], timeout=30,
+            verify=params["restconf_cert"], timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -219,8 +230,8 @@ def connect_netconf(params: dict) -> ConnectionResult:
             host=params["host"],
             port=params["netconf_port"],
             username=params["username"],
-            password=params["password"],
-            hostkey_verify=False,
+            key_filename=params["ssh_key"],
+            hostkey_verify=True,
             device_params={"name": "default"},
             timeout=30,
         ) as m:
@@ -280,7 +291,103 @@ def connect_gnmi(params: dict) -> ConnectionResult:
 
 
 # ──────────────────────────────────────────────
-# 6. Telnet / CLI  (Netmiko)
+# 6. SNMPv3  (pysnmp — USM authPriv)
+# ──────────────────────────────────────────────
+def connect_snmpv3(params: dict) -> ConnectionResult:
+    from pysnmp.hlapi.v3arch.asyncio import (
+        SnmpEngine, UsmUserData, UdpTransportTarget, ContextData,
+        ObjectType, ObjectIdentity, bulk_cmd,
+        usmHMACSHAAuthProtocol, usmAesCfb128Protocol,
+    )
+    import asyncio
+    result = ConnectionResult(method="SNMPv3 (pysnmp/USM)")
+    start = time.perf_counter()
+    try:
+        async def _bulk():
+            engine = SnmpEngine()
+            user = UsmUserData(
+                params["snmpv3_user"],
+                authKey=params["snmpv3_auth_key"],
+                privKey=params["snmpv3_priv_key"],
+                authProtocol=usmHMACSHAAuthProtocol,
+                privProtocol=usmAesCfb128Protocol,
+            )
+            target = await UdpTransportTarget.create(
+                (params["host"], params["snmpv3_port"]), timeout=10, retries=2,
+            )
+            # GETBULK walk — pysnmp v7 uses await, not async for
+            ifaces = {}
+            iftable = "1.3.6.1.2.1.2.2.1"      # IF-MIB::ifTable
+            ifalias = "1.3.6.1.2.1.31.1.1.1.18" # IF-MIB::ifAlias (ifXTable)
+
+            async def _walk(prefix, oids):
+                """Walk a single table subtree via GETBULK."""
+                req = list(oids)
+                while True:
+                    err_ind, err_st, err_idx, vbs = await bulk_cmd(
+                        engine, user, target, ContextData(),
+                        0, 25, *req,
+                    )
+                    if err_ind:
+                        raise RuntimeError(str(err_ind))
+                    if err_st:
+                        raise RuntimeError(f"SNMP error: {err_st.prettyPrint()} at {err_idx}")
+                    done = False
+                    for oid, val in vbs:
+                        oid_str = str(oid)
+                        if not oid_str.startswith(prefix):
+                            done = True
+                            continue
+                        yield oid_str, val
+                    if done or not vbs:
+                        break
+                    req = [ObjectType(ObjectIdentity(str(oid))) for oid, _ in vbs[-len(req):]]
+
+            # Walk 1: ifDescr, ifAdminStatus, ifOperStatus
+            async for oid_str, val in _walk(iftable, [
+                ObjectType(ObjectIdentity(f"{iftable}.2")),   # ifDescr
+                ObjectType(ObjectIdentity(f"{iftable}.7")),   # ifAdminStatus
+                ObjectType(ObjectIdentity(f"{iftable}.8")),   # ifOperStatus
+            ]):
+                idx = oid_str.split(".")[-1]
+                if f"{iftable}.2." in oid_str:
+                    ifaces.setdefault(idx, {})["name"] = str(val)
+                elif f"{iftable}.7." in oid_str:
+                    ifaces.setdefault(idx, {})["admin"] = "UP" if int(val) == 1 else "DOWN"
+                elif f"{iftable}.8." in oid_str:
+                    ifaces.setdefault(idx, {})["oper"] = "UP" if int(val) == 1 else "DOWN"
+
+            # Walk 2: ifAlias (user-configured description, from ifXTable)
+            async for oid_str, val in _walk(ifalias, [
+                ObjectType(ObjectIdentity(ifalias)),
+            ]):
+                idx = oid_str.split(".")[-1]
+                desc = str(val).strip()
+                if idx in ifaces and desc:
+                    ifaces[idx]["desc"] = desc
+
+            engine.close_dispatcher()
+            return ifaces
+
+        ifaces = asyncio.run(_bulk())
+        if not ifaces:
+            raise RuntimeError("SNMP walk returned no interface data")
+        result.success = True
+        result.data = {"source": "IF-MIB::ifTable + ifXTable via SNMPv3"}
+        rows = [f"{'Interface':<20} {'Description':<22} {'Admin':<8} {'Oper'}", "-" * 62]
+        for idx in sorted(ifaces, key=lambda x: int(x)):
+            entry = ifaces[idx]
+            rows.append(f"{entry.get('name', '?'):<20} {entry.get('desc', ''):<22} {entry.get('admin', '?'):<8} {entry.get('oper', '?')}")
+        result.raw_output = "\n".join(rows) if ifaces else "(no interface data)"
+    except Exception as exc:
+        result.error = f"{type(exc).__name__}: {exc}"
+    finally:
+        result.elapsed_seconds = time.perf_counter() - start
+    return result
+
+
+# ──────────────────────────────────────────────
+# 7. Telnet / CLI  (Netmiko)
 # ──────────────────────────────────────────────
 def connect_telnet(params: dict) -> ConnectionResult:
     from netmiko import ConnectHandler
@@ -309,7 +416,7 @@ def connect_telnet(params: dict) -> ConnectionResult:
 
 
 # ──────────────────────────────────────────────
-# Orchestrator — run all 6 concurrently
+# Orchestrator — run all 7 concurrently
 # ──────────────────────────────────────────────
 def run_benchmark(params: dict) -> list[ConnectionResult]:
     methods = [
@@ -318,10 +425,11 @@ def run_benchmark(params: dict) -> list[ConnectionResult]:
         connect_restconf,
         connect_netconf,
         connect_gnmi,
+        connect_snmpv3,
         connect_telnet,
     ]
     results: list[ConnectionResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(methods)) as executor:
         future_map = {
             executor.submit(fn, params): fn.__name__ for fn in methods
         }
@@ -346,12 +454,12 @@ def generate_report(results: list[ConnectionResult], params: dict) -> str:
     sep = "=" * w
     lines = [
         sep,
-        "ARISTA SWITCH - 5-METHOD CONNECTION BENCHMARK".center(w),
+        "ARISTA SWITCH - 7-METHOD CONNECTION BENCHMARK".center(w),
         sep,
         f"  Target Host  : {params['host']}",
         f"  Timestamp    : {timestamp}",
-        f"  Query        : show interfaces status / openconfig-interfaces:interfaces",
-        f"  Methods      : SSH/CLI, eAPI, RESTCONF, NETCONF, gNMI",
+        f"  Query        : show interfaces status / openconfig-interfaces:interfaces / IF-MIB::ifTable",
+        f"  Methods      : SSH/CLI, eAPI, RESTCONF, NETCONF, gNMI, SNMPv3, Telnet",
         sep, "",
         "PERFORMANCE RANKING (fastest -> slowest)",
         "-" * w,
@@ -399,12 +507,12 @@ def generate_report(results: list[ConnectionResult], params: dict) -> str:
 # ──────────────────────────────────────────────
 def main():
     print(f"\n{'=' * 60}")
-    print("  Arista Switch -- 6-Method Concurrent Benchmark")
+    print("  Arista Switch -- 7-Method Concurrent Benchmark")
     print(f"  Target: {SWITCH_PARAMS['host']}")
     print(f"  Query : show interfaces status")
     print(f"{'=' * 60}\n")
-    print("  Starting all 6 connections simultaneously...")
-    print("  Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI | Telnet\n")
+    print("  Starting all 7 connections simultaneously...")
+    print("  Methods: SSH/CLI | eAPI | RESTCONF | NETCONF | gNMI | SNMPv3 | Telnet\n")
 
     overall_start = time.perf_counter()
     results = run_benchmark(SWITCH_PARAMS)

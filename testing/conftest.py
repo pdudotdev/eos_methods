@@ -38,8 +38,14 @@ def sample_params():
         "gnmi_port": 6030,
         "ssh_port": 22,
         "telnet_port": 23,
-        "verify_ssl": False,
-        "gnmi_cert": "/tmp/fake.crt",
+        "ssh_key": "/tmp/fake-secrets/ssh_key",
+        "eapi_cert": "/tmp/fake-secrets/eapi.crt",
+        "restconf_cert": "/tmp/fake-secrets/rest.crt",
+        "gnmi_cert": "/tmp/fake-secrets/gnmi.crt",
+        "snmpv3_user": "benchmark",
+        "snmpv3_auth_key": "admin",
+        "snmpv3_priv_key": "admin",
+        "snmpv3_port": 161,
     }
 
 

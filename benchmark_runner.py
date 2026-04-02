@@ -4,6 +4,7 @@ Runs arista.py 100 times and averages the elapsed time per method.
 """
 
 import subprocess
+import sys
 import re
 from collections import defaultdict
 
@@ -26,14 +27,14 @@ try:
                 method, elapsed, status = m.group(1).strip(), float(m.group(2)), m.group(3)
                 if status == "FAIL":
                     print(f"\n  ERROR: {method} failed on run {i}. Stopping.")
-                    exit(1)
+                    sys.exit(1)
                 totals[method] += elapsed
                 counts[method] += 1
 except KeyboardInterrupt:
     print(f"\n\n  Interrupted at run {i}/{RUNS}.\n")
 
 if not totals:
-    exit(0)
+    sys.exit(1)
 
 print(f"\n  Completed {i} runs\n")
 print(f"  {'Rank':<6} {'Method':<30} {'Avg Time (s)':<14} {'Success Rate'}")
@@ -42,5 +43,5 @@ print(f"  {'-' * 65}")
 averages = [(m, totals[m] / counts[m], counts[m]) for m in totals]
 averages.sort(key=lambda x: x[1])
 
-for i, (method, avg, count) in enumerate(averages, 1):
-    print(f"  {i:<6} {method:<30} {avg:<14.4f} {count}/{RUNS}")
+for rank, (method, avg, count) in enumerate(averages, 1):
+    print(f"  {rank:<6} {method:<30} {avg:<14.4f} {count}/{RUNS}")

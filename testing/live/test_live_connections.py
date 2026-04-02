@@ -9,6 +9,7 @@ from arista import (
     connect_restconf,
     connect_netconf,
     connect_gnmi,
+    connect_snmpv3,
     connect_telnet,
 )
 
@@ -20,6 +21,7 @@ from arista import (
     pytest.param(connect_restconf, lambda r: "Interface" in r.raw_output, id="restconf"),
     pytest.param(connect_netconf,  lambda r: "Interface" in r.raw_output, id="netconf"),
     pytest.param(connect_gnmi,     lambda r: r.data is not None and "notification" in r.data, id="gnmi"),
+    pytest.param(connect_snmpv3,   lambda r: "Interface" in r.raw_output or "Et" in r.raw_output, id="snmpv3"),
     pytest.param(connect_telnet,   lambda r: "Et" in r.raw_output or "Ma" in r.raw_output, id="telnet"),
 ])
 def test_live_connection(switch_params, live_results, connect_fn, check):
