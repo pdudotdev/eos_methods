@@ -21,7 +21,7 @@ jobs:
           python-version: "3.12"
           cache: "pip"
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest
+        run: pip install -r requirements.txt
       - name: Run unit and integration tests
         run: python -m pytest testing/test_unit.py testing/test_integration.py -v --tb=short
 
