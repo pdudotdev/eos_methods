@@ -3,29 +3,102 @@
 ! Apply this config to your switch before running the benchmark
 ! ============================================================
 
-! Generate self-signed certificates (run from privileged exec)
-!   security pki certificate generate self-signed eapi.crt key eapi.key generate rsa 2048 parameters common-name eapi subject-alternative-name ip 172.20.20.208
-!   security pki certificate generate self-signed rest.crt key rest.key generate rsa 2048 parameters common-name rest subject-alternative-name ip 172.20.20.208
-!   security pki certificate generate self-signed gnmi.crt key gnmi.key generate rsa 2048 parameters common-name gnmi subject-alternative-name ip 172.20.20.208
+! ============================================================
+! CERTIFICATE ARCHITECTURE — One CA for Everything (mTLS)
+! ============================================================
+! A single CA signs all server certs AND the client cert.
+! Both sides trust only the CA — no individual cert pinning.
+!
+!   ca.crt (Certificate Authority — single root of trust)
+!   ├── eapi_server.crt   — EOS presents to clients
+!   ├── rest_server.crt   — EOS presents to clients
+!   ├── gnmi_server.crt   — EOS presents to clients
+!   └── client.crt        — client presents to EOS (mTLS)
+!
+! --- Step A: Generate all certs on Ubuntu client ---
+!
+!   # Create the CA
+!   openssl genrsa -out secrets_example/ca.key 2048
+!   openssl req -new -x509 -key secrets_example/ca.key -out secrets_example/ca.crt -days 365 \
+!     -subj "/CN=benchmark-ca"
+!
+!   # Server cert for eAPI (SAN required for IP-based verification)
+!   openssl genrsa -out secrets_example/eapi_server.key 2048
+!   openssl req -new -key secrets_example/eapi_server.key -out /tmp/eapi.csr -subj "/CN=eapi"
+!   openssl x509 -req -in /tmp/eapi.csr -CA secrets_example/ca.crt -CAkey secrets_example/ca.key \
+!     -CAcreateserial -out secrets_example/eapi_server.crt -days 365 \
+!     -extfile <(echo "subjectAltName=IP:172.20.20.208")
+!
+!   # Server cert for RESTCONF
+!   openssl genrsa -out secrets_example/rest_server.key 2048
+!   openssl req -new -key secrets_example/rest_server.key -out /tmp/rest.csr -subj "/CN=rest"
+!   openssl x509 -req -in /tmp/rest.csr -CA secrets_example/ca.crt -CAkey secrets_example/ca.key \
+!     -CAcreateserial -out secrets_example/rest_server.crt -days 365 \
+!     -extfile <(echo "subjectAltName=IP:172.20.20.208")
+!
+!   # Server cert for gNMI
+!   openssl genrsa -out secrets_example/gnmi_server.key 2048
+!   openssl req -new -key secrets_example/gnmi_server.key -out /tmp/gnmi.csr -subj "/CN=gnmi"
+!   openssl x509 -req -in /tmp/gnmi.csr -CA secrets_example/ca.crt -CAkey secrets_example/ca.key \
+!     -CAcreateserial -out secrets_example/gnmi_server.crt -days 365 \
+!     -extfile <(echo "subjectAltName=IP:172.20.20.208")
+!
+!   # Client cert for mTLS (CN=admin matches EOS username)
+!   openssl genrsa -out secrets_example/client.key 2048
+!   openssl req -new -key secrets_example/client.key -out /tmp/client.csr -subj "/CN=admin"
+!   openssl x509 -req -in /tmp/client.csr -CA secrets_example/ca.crt -CAkey secrets_example/ca.key \
+!     -CAcreateserial -out secrets_example/client.crt -days 365
+!
+! --- Step B: Copy certs to the cEOS container's flash ---
+!
+!   docker cp secrets_example/ca.crt clab-<topo>-<node>:/mnt/flash/benchmark-ca.crt
+!   docker cp secrets_example/eapi_server.crt clab-<topo>-<node>:/mnt/flash/eapi_server.crt
+!   docker cp secrets_example/eapi_server.key clab-<topo>-<node>:/mnt/flash/eapi_server.key
+!   docker cp secrets_example/rest_server.crt clab-<topo>-<node>:/mnt/flash/rest_server.crt
+!   docker cp secrets_example/rest_server.key clab-<topo>-<node>:/mnt/flash/rest_server.key
+!   docker cp secrets_example/gnmi_server.crt clab-<topo>-<node>:/mnt/flash/gnmi_server.crt
+!   docker cp secrets_example/gnmi_server.key clab-<topo>-<node>:/mnt/flash/gnmi_server.key
+!
+!   # Fix key permissions (docker cp preserves 600; EOS copy needs 644)
+!   docker exec clab-<topo>-<node> chmod 644 /mnt/flash/eapi_server.key /mnt/flash/rest_server.key /mnt/flash/gnmi_server.key
+!
+! --- Step C: Import into EOS PKI store ---
+!
+!   Note: "ca.crt" is reserved by containerlab — use "benchmark-ca.crt" instead.
+!   Note: /tmp/ is volatile on cEOS — always use flash: for imports.
+!
+! On EOS (privileged exec):
+!   copy flash:benchmark-ca.crt certificate:benchmark-ca.crt
+!   copy flash:eapi_server.crt certificate:eapi.crt
+!   copy flash:eapi_server.key sslkey:eapi.key
+!   copy flash:rest_server.crt certificate:rest.crt
+!   copy flash:rest_server.key sslkey:rest.key
+!   copy flash:gnmi_server.crt certificate:gnmi.crt
+!   copy flash:gnmi_server.key sslkey:gnmi.key
+
+! Generate self-signed SSH X.509 cert (SSH uses its own key exchange, not the CA)
 !   security pki certificate generate self-signed sshx.crt key sshx.key generate rsa 2048 parameters common-name sshx subject-alternative-name ip 172.20.20.208
 
-! Create the SSL profiles and bind the certs/keys
+! Create the SSL profiles — server certs + CA trust for mTLS
 management security
    ssl profile eapi
       certificate eapi.crt key eapi.key
+      trust certificate benchmark-ca.crt
    !
    ssl profile gnmi
       certificate gnmi.crt key gnmi.key
+      trust certificate benchmark-ca.crt
    !
    ssl profile restconf
       certificate rest.crt key rest.key
+      trust certificate benchmark-ca.crt
    !
    ssl profile sshx
       certificate sshx.crt key sshx.key
 
-! 1. SSH — enabled by default, add certificate
-!  ssh-keygen -t rsa -b 2048 -f secrets/ssh_key -N ""
-!  cat secrets/ssh_key.pub
+! 1. SSH — enabled by default, add public key
+!  ssh-keygen -t rsa -b 2048 -f secrets_example/ssh_key -N ""
+!  cat secrets_example/ssh_key.pub
 !  username admin ssh-key ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCUha5vrs929HNxvsn09MOESCZ3ck2jPceBgQXAxUJbjPzrZ00cCu5hb/sq7tqTCw1HCnOMm+hrl3YQXhsOMzAM6AY06Abp3YdrzSDYUIVBqjZsmf/j601B+I2ONyc8HN3tbuv62H6WqXxzZpUqp7IX/t7Ei7NVm06IL3mLFEfdXZpaGE5b/aMLtqHmlmICq1Vr8z51iRAd18ZH11yGJWVT8KDHRcVwNOyKwMAK5ievAGg2w3gcLWeotDtIm4KiZ17PyoZqQbjsHvr/iUBcZs6SNwLVzyQYyLR5O6uVvQyKc/Es3tGWv2ie2zl9vTpHnshSFnSy6MuGYcBu8ruK20fv mcp@mcp
 management ssh
    idle-timeout 15
@@ -35,11 +108,10 @@ management ssh
       username domain omit
 !
 
-! 2. eAPI — JSON-RPC over HTTPS
+! 2. eAPI — JSON-RPC over HTTPS (mTLS via SSL profile)
 management api http-commands
-   protocol https
+   protocol https ssl profile eapi
    no shutdown
-   vrf default
 !
 
 ! 3. RESTCONF — OpenConfig REST interface
@@ -86,10 +158,170 @@ management telnet
 !
 
 ! Verify all APIs are running:
+!   show management security ssl profile
 !   show management api http-commands
 !   show management api restconf
 !   show management api netconf
 !   show management api gnmi
 !   show management ssh
-!   show management security ssl profile
 !   show snmp user
+
+! ============================================================
+! LOCKOUT PREVENTION — Read BEFORE configuring TACACS+/RADIUS
+! ============================================================
+! 1. Always include "local" at the end of aaa authentication:
+!       aaa authentication login default group <GROUP> local
+!    If the AAA server is unreachable, EOS falls back to local auth.
+!
+! 2. Ensure local users keep admin privileges:
+!       aaa authorization policy local default-role network-admin
+!
+! 3. Never delete the local admin user while testing AAA.
+!
+! 4. Test login from a SECOND terminal — do not close your current session.
+!
+! 5. If locked out: access via console port with local credentials.
+!
+! 6. To revert AAA completely:
+!       no aaa authentication login default
+!       no aaa authorization exec default
+!       no aaa authorization commands all default
+!       no aaa accounting commands all default
+
+! ============================================================
+! 8. TACACS+ — Centralized Authentication, Authorization, Accounting
+! ============================================================
+! Protocol: TCP/49, shared-key packet obfuscation (entire payload encrypted)
+! Separates authn, authz, and accounting into distinct message types
+! Certificate support: TACACS+ over TLS (RFC 9190) NOT available on cEOS 4.35.0F
+!
+! --- EOS Switch Config ---
+
+tacacs-server host 172.20.20.1 key 0 tacacskey
+
+aaa group server tacacs+ TACACS-SERVERS
+   server 172.20.20.1
+
+aaa authentication login default group TACACS-SERVERS local
+aaa authorization exec default group TACACS-SERVERS local
+aaa authorization policy local default-role network-admin
+aaa authorization commands all default local
+aaa accounting commands all default start-stop group TACACS-SERVERS
+!
+! Verify:
+!   show tacacs
+!   show aaa
+!   show aaa sessions
+!   show aaa counters
+!
+! --- Ubuntu Server Setup (tac_plus-ng) ---
+!
+! The tacacs+ package is NOT in Ubuntu 24.04 repos.
+! Option A: Build tac_plus-ng from source
+!
+!   sudo apt install build-essential libpcre2-dev libevent-dev
+!   git clone https://github.com/MarcJHuber/event-driven-servers.git
+!   cd event-driven-servers
+!   ./configure --with-tacacsd
+!   make
+!   sudo make install
+!
+!   # Create config at /usr/local/etc/tac_plus.cfg:
+!   id = spawnd {
+!       listen = { port = 49 }
+!       spawn = { instances min = 1 instances max = 10 }
+!       background = yes
+!   }
+!   id = tac_plus {
+!       key = tacacskey
+!       user = admin {
+!           password = clear admin
+!           service = shell {
+!               set priv-lvl = 15
+!               default cmd = permit
+!           }
+!       }
+!   }
+!
+!   sudo /usr/local/sbin/tac_plus /usr/local/etc/tac_plus.cfg
+!
+! Option B: Docker (if available)
+!
+!   # Pull a TACACS+ image and mount your config
+!   docker run -d --name tacacs -p 49:49 dchidell/docker-tacacs
+!
+
+! ============================================================
+! 9. RADIUS — Centralized Authentication + Authorization
+! ============================================================
+! Protocol: UDP/1812 (auth) + UDP/1813 (accounting), shared key + MD5
+! Combines authn + authz in a single Access-Accept response
+! Only encrypts the password field (rest is cleartext)
+! Arista VSA: Vendor 30065, Arista-AVPair for role assignment
+! Certificate support: RadSec (RFC 6614, RADIUS over TLS) NOT available on cEOS 4.35.0F
+!
+! --- EOS Switch Config ---
+
+radius-server host 172.20.20.1 key 0 radiuskey
+
+aaa group server radius RADIUS-SERVERS
+   server 172.20.20.1
+
+aaa authentication login default group RADIUS-SERVERS local
+aaa authorization policy local default-role network-admin
+!
+! Verify:
+!   show radius
+!   show aaa
+!   show aaa counters
+!
+! --- Ubuntu Server Setup (FreeRADIUS) ---
+!
+!   sudo apt install freeradius
+!
+!   # Step A: Add the EOS switch as a RADIUS client
+!   # Edit /etc/freeradius/3.0/clients.conf — add at the end:
+!
+!   client arista-switch {
+!       ipaddr = 172.20.20.208
+!       secret = radiuskey
+!       shortname = ceos
+!   }
+!
+!   # Step B: Create the Arista VSA dictionary
+!   # Create /etc/freeradius/3.0/dictionary.arista:
+!
+!   VENDOR      Arista      30065
+!   BEGIN-VENDOR Arista
+!   ATTRIBUTE   Arista-AVPair   1   string
+!   END-VENDOR  Arista
+!
+!   # Then include it — add to /etc/freeradius/3.0/dictionary:
+!   $INCLUDE dictionary.arista
+!
+!   # Step C: Add the user
+!   # Edit /etc/freeradius/3.0/users — add at the TOP:
+!
+!   admin  Cleartext-Password := "admin"
+!          Arista-AVPair = "shell:roles=network-admin"
+!
+!   # Start in debug mode (foreground, verbose — useful for testing):
+!   sudo systemctl stop freeradius
+!   sudo freeradius -X
+!
+!   # Or run as a service:
+!   sudo systemctl restart freeradius
+!   sudo systemctl status freeradius
+!
+
+! Updated verify commands (all APIs + AAA):
+!   show management security ssl profile
+!   show management api http-commands
+!   show management api restconf
+!   show management api netconf
+!   show management api gnmi
+!   show management ssh
+!   show snmp user
+!   show tacacs
+!   show radius
+!   show aaa

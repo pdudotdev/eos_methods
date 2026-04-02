@@ -59,10 +59,10 @@ SWITCH_PARAMS = {
     "gnmi_port": 6030,
     "ssh_port": 22,
     "telnet_port": 23,
-    "ssh_key": "secrets/ssh_key",
-    "eapi_cert": "secrets/eapi.crt",
-    "restconf_cert": "secrets/rest.crt",
-    "gnmi_cert": "secrets/gnmi.crt",
+    "ssh_key": "secrets_example/ssh_key",
+    "ca_cert": "secrets_example/ca.crt",
+    "client_cert": "secrets_example/client.crt",
+    "client_key": "secrets_example/client.key",
     "snmpv3_user": "benchmark",
     "snmpv3_auth_key": "admin1234",
     "snmpv3_priv_key": "admin1234",
@@ -168,7 +168,9 @@ def connect_eapi(params: dict) -> ConnectionResult:
         resp = requests.post(
             url, json=payload,
             auth=HTTPBasicAuth(params["username"], params["password"]),
-            verify=params["eapi_cert"], timeout=30,
+            verify=params["ca_cert"],
+            cert=(params["client_cert"], params["client_key"]),
+            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -202,7 +204,9 @@ def connect_restconf(params: dict) -> ConnectionResult:
         resp = requests.get(
             url, headers=headers,
             auth=HTTPBasicAuth(params["username"], params["password"]),
-            verify=params["restconf_cert"], timeout=30,
+            verify=params["ca_cert"],
+            cert=(params["client_cert"], params["client_key"]),
+            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -255,8 +259,8 @@ def connect_gnmi(params: dict) -> ConnectionResult:
     result = ConnectionResult(method="gNMI (pygnmi/gRPC)")
     start = time.perf_counter()
     try:
-        # path_cert pins the device certificate locally, eliminating the
-        # first TCP connection pygnmi uses to retrieve it at runtime.
+        # mTLS: path_root verifies the server cert via CA, path_cert/path_key
+        # present the client cert to the server for mutual authentication.
         # encoding="json_ietf" is the standards-compliant OpenConfig encoding
         # (namespace-qualified keys). This EOS version does not support proto
         # encoding; on platforms that do, proto would be significantly smaller.
@@ -266,7 +270,9 @@ def connect_gnmi(params: dict) -> ConnectionResult:
             target=(params["host"], params["gnmi_port"]),
             username=params["username"],
             password=params["password"],
-            path_cert=params["gnmi_cert"], # or `insecure=True` to unpin the certificate
+            path_root=params["ca_cert"],
+            path_cert=params["client_cert"],
+            path_key=params["client_key"],
         ) as gc:
             gnmi_result = gc.get(
                 path=["/interfaces"],

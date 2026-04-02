@@ -2,6 +2,77 @@
 
 Seven methods, same query (`show interfaces status`), same device, same LAN. Times measured end-to-end by the Python benchmark script (`arista.py`) and confirmed at the packet level via Wireshark captures.
 
+## Mutual TLS (mTLS)
+
+The three HTTPS/gRPC protocols — **eAPI**, **RESTCONF**, and **gNMI** — use mutual TLS. Both sides authenticate each other at the transport layer:
+
+- **Server → client**: EOS presents its CA-signed server certificate; the client verifies it against `ca.crt`.
+- **Client → server**: The client presents its CA-signed client certificate; EOS verifies it against the same `ca.crt` (configured via `trust certificate benchmark-ca.crt` in each SSL profile).
+
+A single Certificate Authority signs all certificates (server and client). Both sides trust only the CA — no individual cert pinning.
+
+```
+ca.crt  (Certificate Authority — single root of trust)
+├── eapi_server.crt    — EOS presents to clients
+├── rest_server.crt    — EOS presents to clients
+├── gnmi_server.crt    — EOS presents to clients
+└── client.crt         — client presents to EOS
+```
+
+**How each protocol presents the client cert:**
+
+| Protocol | Library | Server verification | Client cert (mTLS) |
+|----------|---------|--------------------|--------------------|
+| eAPI | `requests` | `verify=ca.crt` | `cert=(client.crt, client.key)` |
+| RESTCONF | `requests` | `verify=ca.crt` | `cert=(client.crt, client.key)` |
+| gNMI | `pygnmi` | `path_root=ca.crt` | `path_cert=client.crt`, `path_key=client.key` |
+
+Username/password authentication remains alongside mTLS (defense in depth) — HTTP Basic Auth for eAPI/RESTCONF, gRPC metadata for gNMI. mTLS adds transport-layer client verification; it does not replace application-layer authentication.
+
+**TLS 1.3 mTLS handshake sequence** (identical for eAPI/RESTCONF/gNMI, confirmed via Wireshark):
+
+```
+  Client (Python)                                 Server (EOS)
+       |                                               |
+       |  1. ClientHello                               |
+       |  (supported ciphers, client random, ALPN)     |
+       |---------------------------------------------->|
+       |                                               |
+       |                            2. ServerHello     |
+       |                (selected cipher, server random)|
+       |<----------------------------------------------|
+       |                                               |
+       |     ---- encrypted from here (TLS 1.3) ----   |
+       |                                               |
+       |                     3. Server Certificate     |
+       |         (eapi.crt / rest.crt / gnmi.crt)      |
+       |          Issuer: benchmark-ca (our CA)         |
+       |            SAN: IP 172.20.20.208              |
+       |<----------------------------------------------|
+       |                                               |
+       |                  4. CertificateRequest        |
+       |          (server asks: "show me YOUR cert")   |
+       |<----------------------------------------------|
+       |                                               |
+       |  5. Client Certificate                        |
+       |     (client.crt, CN=admin)                    |
+       |      Issuer: benchmark-ca (same CA)           |
+       |---------------------------------------------->|
+       |                                               |
+       |  6. CertificateVerify                         |
+       |     (client signs handshake hash with          |
+       |      client.key — proves key ownership)       |
+       |---------------------------------------------->|
+       |                                               |
+       |  7. Finished                                  |
+       |<=============================================>|
+       |         (application data flows)              |
+```
+
+Steps 3-6 are encrypted in TLS 1.3 (unlike TLS 1.2 where only data after Finished is encrypted). To see them in Wireshark, load the `SSLKEYLOGFILE` session keys at Edit > Preferences > Protocols > TLS > Pre-Master-Secret log file.
+
+**Wireshark decryption**: eAPI (port 443) decrypts automatically. RESTCONF (port 6020) requires Decode As > TLS since Wireshark doesn't recognize port 6020 as TLS by default. gNMI mTLS works functionally but cannot be decrypted in Wireshark — grpcio bundles BoringSSL, which does not support `SSLKEYLOGFILE`. The handshake is identical across all three protocols; only the port, server cert CN, and application protocol (HTTP/1.1 vs HTTP/2) differ.
+
 ## Final Rankings
 
 | Rank | Method                | Time      | Packets |

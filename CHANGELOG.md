@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.0
+
+Mutual TLS (mTLS) for eAPI, RESTCONF, and gNMI.
+
+- CA-based certificate architecture: one CA signs all server and client certs
+- Client certificate authentication for eAPI, RESTCONF (`requests` `cert=` param) and gNMI (`pygnmi` `path_cert`/`path_key`/`path_root`)
+- EOS SSL profiles updated with `trust certificate benchmark-ca.crt` for client cert verification
+- `SWITCH_PARAMS` uses `ca_cert` for server verification (replaces per-protocol cert pinning), `client_cert`/`client_key` for mTLS
+- Certificate generation and EOS import steps documented in `eos_setup/commands.txt`
+- mTLS architecture and Wireshark visibility documented in `REPORT.md`
+- TACACS+ and RADIUS configuration documentation added to `eos_setup/commands.txt` (EOS config, Ubuntu server setup, lockout prevention)
+- Fixed live test checks for abbreviated interface names (`Et`/`Ma` vs `Ethernet`/`Management`)
+
 ## v1.0.0
 
 Initial release — 7-method concurrent benchmark for Arista EOS.

@@ -1,10 +1,7 @@
 ! Command: show running-config
 ! device: C2A (cEOSLab, EOS-4.35.0F-44178984.4350F (engineering build))
 !
-! Generate self-signed certificates (run from privileged exec)
-!   security pki certificate generate self-signed eapi.crt key eapi.key generate rsa 2048 parameters common-name eapi subject-alternative-name ip 172.20.20.208
-!   security pki certificate generate self-signed rest.crt key rest.key generate rsa 2048 parameters common-name rest subject-alternative-name ip 172.20.20.208
-!   security pki certificate generate self-signed gnmi.crt key gnmi.key generate rsa 2048 parameters common-name gnmi subject-alternative-name ip 172.20.20.208
+! Generate self-signed SSH certificate (run from privileged exec)
 !   security pki certificate generate self-signed sshx.crt key sshx.key generate rsa 2048 parameters common-name sshx subject-alternative-name ip 172.20.20.208
 !
 no aaa root
