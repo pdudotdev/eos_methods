@@ -41,6 +41,12 @@ def test_netconf_xml_summary_malformed_xml():
     """Malformed XML returns an error message instead of crashing."""
     output = _netconf_xml_summary("<not-valid>>")
     assert output.startswith("(XML parse error:")
+    assert "<not-valid>>" in output
+
+
+def test_oc_ifaces_summary_empty_list():
+    """Empty interface list returns a sentinel string, not a crash."""
+    assert _oc_ifaces_summary([]) == "(no interface data)"
 
 
 # ── generate_report ───────────────────────────────────────────

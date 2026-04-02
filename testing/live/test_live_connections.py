@@ -16,13 +16,13 @@ from arista import (
 
 @pytest.mark.live
 @pytest.mark.parametrize("connect_fn, check", [
-    pytest.param(connect_ssh_cli,  lambda r: "Et" in r.raw_output or "Ma" in r.raw_output, id="ssh"),
+    pytest.param(connect_ssh_cli,  lambda r: "Ethernet" in r.raw_output or "Management" in r.raw_output, id="ssh"),
     pytest.param(connect_eapi,     lambda r: isinstance(r.data, dict) and "interfaceStatuses" in r.data, id="eapi"),
     pytest.param(connect_restconf, lambda r: "Interface" in r.raw_output, id="restconf"),
     pytest.param(connect_netconf,  lambda r: "Interface" in r.raw_output, id="netconf"),
     pytest.param(connect_gnmi,     lambda r: r.data is not None and "notification" in r.data, id="gnmi"),
-    pytest.param(connect_snmpv3,   lambda r: "Interface" in r.raw_output or "Et" in r.raw_output, id="snmpv3"),
-    pytest.param(connect_telnet,   lambda r: "Et" in r.raw_output or "Ma" in r.raw_output, id="telnet"),
+    pytest.param(connect_snmpv3,   lambda r: "Interface" in r.raw_output or "Ethernet" in r.raw_output, id="snmpv3"),
+    pytest.param(connect_telnet,   lambda r: "Ethernet" in r.raw_output or "Management" in r.raw_output, id="telnet"),
 ])
 def test_live_connection(switch_params, live_results, connect_fn, check):
     result = connect_fn(switch_params)
