@@ -1,2 +1,9 @@
+testing/live/__pycache__
+testing/__pycache__
+__pycache__/
 clab_arista/
 arista/
+study/
+testing/live/live.md
+pcaps/tls_keys.log
+notes/arista_benchmark_results.txt
