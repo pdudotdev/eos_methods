@@ -187,13 +187,25 @@ management telnet
 !       no aaa authorization exec default
 !       no aaa authorization commands all default
 !       no aaa accounting commands all default
+!
+! 7. To switch from TACACS+ to RADIUS:
+!       no aaa authentication login default group TACACS-SERVERS local
+!       no aaa authorization exec default group TACACS-SERVERS local
+!       no aaa accounting commands all default start-stop group TACACS-SERVERS
+!       aaa authentication login default group RADIUS-SERVERS local
+!
+! 8. To switch from RADIUS to TACACS+:
+!       no aaa authentication login default group RADIUS-SERVERS local
+!       aaa authentication login default group TACACS-SERVERS local
+!       aaa authorization exec default group TACACS-SERVERS local
+!       aaa accounting commands all default start-stop group TACACS-SERVERS
 
 ! ============================================================
 ! 8. TACACS+ — Centralized Authentication, Authorization, Accounting
 ! ============================================================
 ! Protocol: TCP/49, shared-key packet obfuscation (entire payload encrypted)
 ! Separates authn, authz, and accounting into distinct message types
-! Certificate support: TACACS+ over TLS (RFC 9190) NOT available on cEOS 4.35.0F
+! Certificate support: TACACS+ over TLS (RFC 9887) NOT available on cEOS 4.35.0F
 !
 ! --- EOS Switch Config ---
 
@@ -219,31 +231,41 @@ aaa accounting commands all default start-stop group TACACS-SERVERS
 ! The tacacs+ package is NOT in Ubuntu 24.04 repos.
 ! Option A: Build tac_plus-ng from source
 !
-!   sudo apt install build-essential libpcre2-dev libevent-dev
+!   sudo apt install build-essential libpcre2-dev
 !   git clone https://github.com/MarcJHuber/event-driven-servers.git
 !   cd event-driven-servers
-!   ./configure --with-tacacsd
+!   ./configure tac_plus-ng
 !   make
 !   sudo make install
 !
 !   # Create config at /usr/local/etc/tac_plus.cfg:
 !   id = spawnd {
-!       listen = { port = 49 }
-!       spawn = { instances min = 1 instances max = 10 }
+!       listen { port = 49 }
+!       spawn { instances min = 1 instances max = 10 }
 !       background = yes
 !   }
-!   id = tac_plus {
-!       key = tacacskey
-!       user = admin {
-!           password = clear admin
-!           service = shell {
-!               set priv-lvl = 15
-!               default cmd = permit
+!   id = tac_plus-ng {
+!       host world {
+!           address = 0.0.0.0/0
+!           key = tacacskey
+!       }
+!       profile admin {
+!           script {
+!               if (service == shell) {
+!                   if (cmd == "")
+!                       set priv-lvl = 15
+!                   permit
+!               }
 !           }
+!       }
+!       user admin {
+!           password login = clear admin
+!           password pap = login
+!           profile = admin
 !       }
 !   }
 !
-!   sudo /usr/local/sbin/tac_plus /usr/local/etc/tac_plus.cfg
+!   sudo /usr/local/sbin/tac_plus-ng /usr/local/etc/tac_plus.cfg
 !
 ! Option B: Docker (if available)
 !
